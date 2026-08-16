@@ -9,3 +9,6 @@ celerybeat-*
 env.sh
 .cache
 .idea/
+IMPLEMENTATION_SPEC.md
+RUNBOOK.md
+CHANGELOG.md
