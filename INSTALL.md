@@ -2,13 +2,25 @@
 
 ## Prerequisites
 
-* Install PostgreSQL 12+
+* Install PostgreSQL 12+ - done
 
-* Install RabbitMQ
+* Install RabbitMQ - done
   This is needed for Celery to work, which does background processing such as
-  the processing of uploaded list-of-voter CSV files.
+  the processing of uploaded list-of-voter CSV files, verification of cast
+  votes, and tally computation.
 
-* Download helios-server
+  **RabbitMQ 4.x note.** RabbitMQ 4.0 disallows transient non-exclusive queues
+  by default, which Celery's mingle/gossip/pidbox consumers declare on startup.
+  Without the setting below the worker fails with
+  `INTERNAL_ERROR - Feature 'transient_nonexcl_queues' is deprecated` and
+  restarts in a loop. Add to `rabbitmq.conf`
+  (Homebrew: `/opt/homebrew/etc/rabbitmq/rabbitmq.conf`) and restart the broker:
+
+```
+deprecated_features.permit.transient_nonexcl_queues = true
+```
+
+* Download helios-server - done (cloned)
 
 * `cd` into the helios-server directory
 
@@ -52,6 +64,17 @@ uv sync
 
 ```
 uv run python manage.py runserver
+```
+
+* Kill server
+```
+kill -9 $(lsof -t -i:8000)
+```
+
+## Run celery worker
+
+```
+uv run celery --app helios worker --events --beat --concurrency 1
 ```
 
 ## Google Auth Configuration

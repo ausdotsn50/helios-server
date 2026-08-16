@@ -88,7 +88,7 @@ wheels = [
 
 [[package]]
 name = "celery"
-version = "5.6.1"
+version = "5.6.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "billiard" },
@@ -101,9 +101,9 @@ dependencies = [
     { name = "tzlocal" },
     { name = "vine" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e2/1b/b9bbe49b1f799d0ee3de91c66e6b61d095139721f5a2ae25585f49d7c7a9/celery-5.6.1.tar.gz", hash = "sha256:bdc9e02b1480dd137f2df392358c3e94bb623d4f47ae1bc0a7dc5821c90089c7", size = 1716388, upload-time = "2025-12-29T21:48:50.805Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/b4/a1233943ab5c8ea05fb877a88a0a0622bf47444b99e4991a8045ac37ea1d/celery-5.6.3.tar.gz", hash = "sha256:177006bd2054b882e9f01be59abd8529e88879ef50d7918a7050c5a9f4e12912", size = 1742243, upload-time = "2026-03-26T12:14:51.76Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/87/b1/7b7d1e0bc2a3f7ee01576008e3c943f3f23a56809b63f4140ddc96f201c1/celery-5.6.1-py3-none-any.whl", hash = "sha256:ee87aa14d344c655fe83bfc44b2c93bbb7cba39ae11e58b88279523506159d44", size = 445358, upload-time = "2025-12-29T21:48:48.894Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/c9/6eccdda96e098f7ae843162db2d3c149c6931a24fda69fe4ab84d0027eb5/celery-5.6.3-py3-none-any.whl", hash = "sha256:0808f42f80909c4d5833202360ffafb2a4f83f4d8e23e1285d926610e9a7afa6", size = 451235, upload-time = "2026-03-26T12:14:49.491Z" },
 ]
 
 [[package]]
@@ -402,7 +402,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "bleach", specifier = "==6.1.0" },
-    { name = "celery", specifier = "==5.6.1" },
+    { name = "celery", specifier = "==5.6.3" },
     { name = "dj-database-url", specifier = "==2.2.0" },
     { name = "django", specifier = "==5.2.9" },
     { name = "django-anymail", specifier = "==11.0.1" },
