@@ -34,6 +34,10 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
 ]
+workload = [
+    "pyyaml>=6.0.3",
+    "selenium>=4.47.0",
+]
 
 [tool.uv]
 package = false
