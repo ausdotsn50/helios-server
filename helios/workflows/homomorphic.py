@@ -7,6 +7,7 @@ reworked 2011-01-09
 """
 
 import logging
+from helios import measure
 from helios.crypto import algs
 from . import WorkflowObject
 
@@ -403,33 +404,49 @@ class Tally(WorkflowObject):
     
     return True
     
-  def decrypt_from_factors(self, decryption_factors, public_key):
+  def decrypt_from_factors(self, decryption_factors, public_key,
+                           election_uuid=None):
     """
     decrypt a tally given decryption factors
-    
+
     The decryption factors are a list of decryption factor sets, for each trustee.
     Each decryption factor set is a list of lists of decryption factors (questions/answers).
+
+    election_uuid is measurement-only and defaults to None, which keeps the
+    signature backward-compatible and makes the spans no-ops for any caller
+    that does not pass it.
     """
-    
-    # pre-compute a dlog table
-    dlog_table = DLogTable(base = public_key.g, modulus = public_key.p)
-    dlog_table.precompute(self.num_tallied)
-    
-    result = []
-    
-    # go through each one
-    for q_num, q in enumerate(self.tally):
-      q_result = []
 
-      for a_num, a in enumerate(q):
-        # coalesce the decryption factors into one list
-        dec_factor_list = [df[q_num][a_num] for df in decryption_factors]
-        raw_value = self.tally[q_num][a_num].decrypt(dec_factor_list, public_key)
-        
-        q_result.append(dlog_table.lookup(raw_value))
+    # The outer span covers the whole body, so precompute + lookup can be
+    # checked against it. Helios builds the dlog table here, in the web
+    # process, synchronously inside the combine_decryptions request.
+    with measure.span(election_uuid, 'decryption_combine_time_ns',
+                      num_tallied=self.num_tallied):
+      # pre-compute a dlog table -- Theta(N) by construction
+      with measure.span(election_uuid, 'dlog_precompute_time_ns',
+                        num_tallied=self.num_tallied):
+        dlog_table = DLogTable(base = public_key.g, modulus = public_key.p)
+        dlog_table.precompute(self.num_tallied)
 
-      result.append(q_result)
-    
+      result = []
+
+      # Directly measured, not derived: per-cell decrypt() plus the O(1)
+      # table lookups.
+      with measure.span(election_uuid, 'dlog_lookup_time_ns',
+                        n_cells=sum(len(q) for q in self.tally)):
+        # go through each one
+        for q_num, q in enumerate(self.tally):
+          q_result = []
+
+          for a_num, a in enumerate(q):
+            # coalesce the decryption factors into one list
+            dec_factor_list = [df[q_num][a_num] for df in decryption_factors]
+            raw_value = self.tally[q_num][a_num].decrypt(dec_factor_list, public_key)
+
+            q_result.append(dlog_table.lookup(raw_value))
+
+          result.append(q_result)
+
     return result
 
   def _process_value_in(self, field_name, field_value):

@@ -17,6 +17,7 @@ from django.db import models, transaction
 from validate_email import validate_email
 
 from helios import datatypes
+from helios import measure
 from helios import utils
 from helios.datatypes.djangofield import LDObjectField
 # useful stuff in helios_auth
@@ -488,9 +489,21 @@ class Election(HeliosModel):
     tally the election, assuming votes already verified
     """
     tally = self.init_tally()
-    for voter in self.voter_set.exclude(vote=None):
-      tally.add_vote(voter.vote, verify_p=False)
+    # .count() is deliberately outside the span: the span covers per-vote
+    # deserialization plus homomorphic addition, which is what a real tally
+    # pays, and is the quantity a harness re-execution cannot reproduce.
+    n_votes = self.voter_set.exclude(vote=None).count()
+    # verify_p is recorded because production hardcodes False here ("assuming
+    # votes already verified"); proof checking is paid at cast time in Celery.
+    # Emitting it keeps that claim auditable from the measurement data.
+    with measure.span(self.uuid, 'aggregation_time_ns', n_votes=n_votes,
+                      verify_p=False):
+      for voter in self.voter_set.exclude(vote=None):
+        tally.add_vote(voter.vote, verify_p=False)
 
+    # The span's record is fsynced before this save(). The harness polls on
+    # encrypted_tally, so the timing is readable by the time the completion
+    # signal becomes visible. No race.
     self.encrypted_tally = tally
     self.save()
 
@@ -525,7 +538,10 @@ class Election(HeliosModel):
     trustees = Trustee.get_by_election(self)
     decryption_factors = [t.decryption_factors for t in trustees]
 
-    self.result = self.encrypted_tally.decrypt_from_factors(decryption_factors, self.public_key)
+    # election_uuid is passed so decrypt_from_factors can attribute its three
+    # internal spans (precompute / lookup / combine) to this election.
+    self.result = self.encrypted_tally.decrypt_from_factors(
+      decryption_factors, self.public_key, election_uuid=self.uuid)
 
     self.append_log(ElectionLog.DECRYPTIONS_COMBINED)
 
@@ -646,7 +662,11 @@ class Election(HeliosModel):
     :type params: Cryptosystem
     """
     # FIXME: generate the keypair
-    keypair = params.generate_keypair()
+    # The election's REAL key, generated in the real flow. The harness's
+    # Stage 1 samples the same primitive 30 times to get a distribution;
+    # this is the one key this election actually used.
+    with measure.span(self.uuid, 'keygen_time_ns', context='election'):
+      keypair = params.generate_keypair()
 
     # create the trustee
     trustee = Trustee(election = self)
@@ -678,8 +698,10 @@ class Election(HeliosModel):
     tally.init_election(self)
 
     trustee = self.get_helios_trustee()
-    factors, proof = tally.decryption_factors_and_proofs(trustee.secret_key)
+    with measure.span(self.uuid, 'decryption_factor_time_ns'):
+      factors, proof = tally.decryption_factors_and_proofs(trustee.secret_key)
 
+    # Recorded before trustee.save(); the harness polls on decryption_factors.
     trustee.decryption_factors = factors
     trustee.decryption_proofs = proof
     trustee.save()

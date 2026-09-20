@@ -5,12 +5,14 @@ Celery queued tasks for Helios
 ben@adida.net
 """
 import copy
+import time
 from celery import shared_task
 from celery.utils.log import get_logger
 from django.conf import settings
 from django.urls import reverse
 from urllib.parse import urlparse
 
+from . import measure
 from . import signals
 from . import utils
 from .models import CastVote, Election, Voter, VoterFile, EmailOptOut
@@ -20,7 +22,17 @@ from .view_utils import render_template_raw
 @shared_task
 def cast_vote_verify_and_store(cast_vote_id, status_update_message=None, **kwargs):
     cast_vote = CastVote.objects.get(id=cast_vote_id)
-    result = cast_vote.verify_and_store()
+    # Proof verification, in the process that actually performs it: the
+    # Celery worker, at cast time. One record per ballot.
+    #
+    # NOT cast_vote.vote.election: CastVote.vote is an EncryptedVote LDObject,
+    # which carries election_uuid but gets .election only from init_election(),
+    # never called on this path. Reading it raises, and because the expression
+    # is evaluated in the argument list it escapes span's own guard and fails
+    # the cast. Use the same path the code below already uses.
+    with measure.span(cast_vote.voter.election.uuid, 'verification_time_ns',
+                      cast_vote_id=cast_vote_id):
+        result = cast_vote.verify_and_store()
 
     voter = cast_vote.voter
     election = voter.election
@@ -111,7 +123,16 @@ def single_voter_notify(voter_uuid, notification_template, extra_vars={}):
 @shared_task
 def election_compute_tally(election_id):
     election = Election.objects.get(id=election_id)
-    election.compute_tally()
+    # Task entry wall clock. The harness knows when it issued the POST;
+    # started_at minus that timestamp is Celery dispatch latency. Cross-process
+    # wall clock, so accurate to clock resolution rather than perf_counter
+    # precision -- both processes are on one machine, and this is disclosed as
+    # wall-clock in the methodology.
+    measure.record(election.uuid, 'task_start_wall_ns', 0,
+                   task='election_compute_tally', started_at=time.time())
+    with measure.span(election.uuid, 'task_compute_tally_ns',
+                      task='election_compute_tally'):
+        election.compute_tally()          # contains aggregation_time_ns
 
     election_notify_admin.delay(election_id=election_id,
                                 subject="encrypted tally computed",
@@ -129,7 +150,11 @@ Helios
 @shared_task
 def tally_helios_decrypt(election_id):
     election = Election.objects.get(id=election_id)
-    election.helios_trustee_decrypt()
+    measure.record(election.uuid, 'task_start_wall_ns', 0,
+                   task='tally_helios_decrypt', started_at=time.time())
+    with measure.span(election.uuid, 'task_helios_decrypt_ns',
+                      task='tally_helios_decrypt'):
+        election.helios_trustee_decrypt()  # contains decryption_factor_time_ns
     election_notify_admin.delay(election_id=election_id,
                                 subject='Helios Decrypt',
                                 body="""
