@@ -324,32 +324,58 @@ class Tally(WorkflowObject):
 
     self.num_tallied += 1
 
-  def decryption_factors_and_proofs(self, sk):
+  def decryption_factors_and_proofs(self, sk, election_uuid=None):
     """
     returns an array of decryption factors and a corresponding array of decryption proofs.
     makes the decryption factors into strings, for general Helios / JS compatibility.
+
+    election_uuid is measurement-only and defaults to None, which keeps the
+    signature backward-compatible and makes the spans no-ops for any caller
+    that does not pass it.
     """
+    # Factor-only pass: the same modexp work as the real pass below, without
+    # the Chaum-Pedersen proofs. Results are discarded; the difference between
+    # this and decryption_factor_time_ns is proof generation.
+    #
+    # This is the ONE place in the instrumentation that does extra WORK rather
+    # than only reading a clock, so it is gated on measure.enabled(). With
+    # HELIOS_MEASURE_PATH unset the loop does not run at all and Helios is
+    # unchanged. It runs FIRST so it cannot benefit from cache warming done by
+    # the real pass.
+    #
+    # Cost is Theta(answer slots), not Theta(N): 6 cells on the smoke face,
+    # 222 on nle2025 -- once per election, independent of voter count.
+    if measure.enabled():
+      with measure.span(election_uuid, 'decryption_factor_only_ns',
+                        n_cells=sum(len(q) for q in self.tally)):
+        for q in self.tally:
+          for c in q:
+            sk.decryption_factor(c)
+
     # for all choices of all questions (double list comprehension)
     decryption_factors = []
     decryption_proof = []
     
-    for question_num, question in enumerate(self.questions):
-      answers = question['answers']
-      question_factors = []
-      question_proof = []
+    # Timed here rather than around the call site, so the factor-only pass
+    # above is excluded from it and the two are directly comparable.
+    with measure.span(election_uuid, 'decryption_factor_time_ns'):
+      for question_num, question in enumerate(self.questions):
+        answers = question['answers']
+        question_factors = []
+        question_proof = []
 
-      for answer_num, answer in enumerate(answers):
-        # do decryption and proof of it
-        dec_factor, proof = sk.decryption_factor_and_proof(self.tally[question_num][answer_num])
+        for answer_num, answer in enumerate(answers):
+          # do decryption and proof of it
+          dec_factor, proof = sk.decryption_factor_and_proof(self.tally[question_num][answer_num])
 
-        # look up appropriate discrete log
-        # this is the string conversion
-        question_factors.append(dec_factor)
-        question_proof.append(proof)
-        
-      decryption_factors.append(question_factors)
-      decryption_proof.append(question_proof)
-    
+          # look up appropriate discrete log
+          # this is the string conversion
+          question_factors.append(dec_factor)
+          question_proof.append(proof)
+
+        decryption_factors.append(question_factors)
+        decryption_proof.append(question_proof)
+
     return decryption_factors, decryption_proof
     
   def decrypt_and_prove(self, sk, discrete_logs=None):

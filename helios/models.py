@@ -507,6 +507,16 @@ class Election(HeliosModel):
     self.encrypted_tally = tally
     self.save()
 
+    # The bulletin board's bulk. Same serialization Helios stores, for the
+    # same reason as the factor/proof payloads above.
+    if measure.enabled():
+      measure.record(
+        self.uuid, 'encrypted_tally_bytes',
+        len(datatypes.LDObject.instantiate(
+          tally, datatype='legacy/Tally').serialize()),
+        unit='bytes', n_votes=n_votes,
+        n_cells=sum(len(q) for q in tally.tally))
+
   def ready_for_decryption(self):
     return self.encrypted_tally is not None
 
@@ -662,9 +672,9 @@ class Election(HeliosModel):
     :type params: Cryptosystem
     """
     # FIXME: generate the keypair
-    # The election's REAL key, generated in the real flow. The harness's
-    # Stage 1 samples the same primitive 30 times to get a distribution;
-    # this is the one key this election actually used.
+    # The election's REAL key, generated in the real flow -- the one key this
+    # election actually used. A distribution comes from repeating cells, not
+    # from sampling the primitive outside the code path that runs it.
     with measure.span(self.uuid, 'keygen_time_ns', context='election'):
       keypair = params.generate_keypair()
 
@@ -679,7 +689,10 @@ class Election(HeliosModel):
     # FIXME: is this at the right level of abstraction?
     trustee.public_key_hash = datatypes.LDObject.instantiate(trustee.public_key, datatype='legacy/EGPublicKey').hash
 
-    trustee.pok = trustee.secret_key.prove_sk(algs.DLog_challenge_generator)
+    # Schnorr proof of knowledge of the secret key. Timed here for the same
+    # reason as keygen above: this is where the deployed system pays it.
+    with measure.span(self.uuid, 'prove_sk_time_ns', context='election'):
+      trustee.pok = trustee.secret_key.prove_sk(algs.DLog_challenge_generator)
 
     trustee.save()
 
@@ -698,13 +711,34 @@ class Election(HeliosModel):
     tally.init_election(self)
 
     trustee = self.get_helios_trustee()
-    with measure.span(self.uuid, 'decryption_factor_time_ns'):
-      factors, proof = tally.decryption_factors_and_proofs(trustee.secret_key)
+    # decryption_factor_time_ns and decryption_factor_only_ns are both recorded
+    # INSIDE decryption_factors_and_proofs, so the factor-only pass is excluded
+    # from the real one. Records are written before trustee.save(), and the
+    # harness polls on decryption_factors, so timings are readable by the time
+    # the completion signal appears.
+    factors, proof = tally.decryption_factors_and_proofs(
+      trustee.secret_key, election_uuid=self.uuid)
 
-    # Recorded before trustee.save(); the harness polls on decryption_factors.
     trustee.decryption_factors = factors
     trustee.decryption_proofs = proof
     trustee.save()
+
+    # What a trustee publishes to the board, measured the way Helios itself
+    # serializes it: LDObjectField.get_prep_value does
+    # LDObject.instantiate(value, datatype=type_hint).serialize(), so a
+    # json.dumps here would report a different size than what is stored.
+    if measure.enabled():
+      _f_type = datatypes.arrayOf(datatypes.arrayOf('core/BigInteger'))
+      _p_type = datatypes.arrayOf(datatypes.arrayOf('legacy/EGZKProof'))
+      n_cells = sum(len(q) for q in tally.tally)
+      measure.record(
+        self.uuid, 'decryption_factors_bytes',
+        len(datatypes.LDObject.instantiate(factors, datatype=_f_type).serialize()),
+        unit='bytes', n_cells=n_cells)
+      measure.record(
+        self.uuid, 'decryption_proofs_bytes',
+        len(datatypes.LDObject.instantiate(proof, datatype=_p_type).serialize()),
+        unit='bytes', n_cells=n_cells)
 
   def append_log(self, text):
     item = ElectionLog(election = self, log=text, at=datetime.datetime.utcnow())
