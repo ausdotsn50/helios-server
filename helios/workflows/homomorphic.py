@@ -346,7 +346,11 @@ class Tally(WorkflowObject):
     # Cost is Theta(answer slots), not Theta(N): 6 cells on the smoke face,
     # 222 on nle2025 -- once per election, independent of voter count.
     if measure.enabled():
+      # overhead=True: this pass exists only to measure. It is still reported
+      # as its own metric, but it is charged to the enclosing spans so
+      # task_helios_decrypt_ns does not bill Helios for it.
       with measure.span(election_uuid, 'decryption_factor_only_ns',
+                        overhead=True,
                         n_cells=sum(len(q) for q in self.tally)):
         for q in self.tally:
           for c in q:

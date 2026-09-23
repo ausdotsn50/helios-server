@@ -17,10 +17,33 @@ database write.
 
 import json
 import os
+import threading
 import time
 
 _PATH = os.environ.get('HELIOS_MEASURE_PATH')
 _ENABLED = bool(_PATH)
+
+# Instrumentation-only cost accrued in the current thread.
+#
+# THE INVARIANT THIS ENFORCES: a span must never report work that exists only
+# because instrumentation is enabled. Two things violate it -- writing a record
+# (~0.06 ms) and any measurement-only computation, such as the proof-free pass
+# in decryption_factors_and_proofs. Both happen INSIDE whatever span encloses
+# them, so without correction every parent is inflated by its children.
+#
+# Enforcing it by review failed twice: one instance was found and fixed, then
+# another appeared in a place the first audit had not looked. So it is enforced
+# structurally instead. Each span notes the accumulator on entry and subtracts
+# the delta on exit, and every future addition is handled automatically.
+#
+# Thread-local because the Celery worker and the Django request each run their
+# spans in one thread; nothing here nests across threads.
+_local = threading.local()
+
+
+def _charge(ns):
+    """Attribute `ns` of instrumentation-only cost to every enclosing span."""
+    _local.overhead = getattr(_local, 'overhead', 0) + ns
 
 
 def enabled():
@@ -33,6 +56,7 @@ def record(election_uuid, metric, value_ns, **extra):
     able to fail an election."""
     if not _ENABLED:
         return
+    _t0 = time.perf_counter_ns()
     try:
         row = {
             'election_uuid': str(election_uuid),
@@ -57,20 +81,39 @@ def record(election_uuid, metric, value_ns, **extra):
             os.fsync(f.fileno())
     except Exception:
         pass
+    # Writing this record is instrumentation-only work. Charge it so any
+    # enclosing span does not report it as Helios's.
+    _charge(time.perf_counter_ns() - _t0)
 
 
 class span:
-    """with measure.span(uuid, 'aggregation_time_ns'): ..."""
+    """
+    with measure.span(uuid, 'aggregation_time_ns'): ...
 
-    def __init__(self, election_uuid, metric, **extra):
+    Reports the window MINUS any instrumentation-only cost incurred inside it,
+    so a span never charges Helios for measurement. `instrumentation_ns` is
+    recorded alongside, so the raw window is always recoverable.
+
+    overhead=True marks a span whose own work exists only for measurement --
+    the proof-free pass, for instance. It is still recorded as a metric, and it
+    is additionally charged to its enclosing spans.
+    """
+
+    def __init__(self, election_uuid, metric, overhead=False, **extra):
         self.uuid, self.metric, self.extra = election_uuid, metric, extra
+        self.overhead = overhead
 
     def __enter__(self):
+        self._ovh0 = getattr(_local, 'overhead', 0)
         self.t0 = time.perf_counter_ns()
         return self
 
     def __exit__(self, *exc):
+        raw = time.perf_counter_ns() - self.t0
         if exc[0] is None:
-            record(self.uuid, self.metric,
-                   time.perf_counter_ns() - self.t0, **self.extra)
+            inner = getattr(_local, 'overhead', 0) - self._ovh0
+            record(self.uuid, self.metric, max(raw - inner, 0),
+                   instrumentation_ns=inner, **self.extra)
+            if self.overhead:
+                _charge(raw)
         return False

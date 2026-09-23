@@ -9,6 +9,7 @@ Ben Adida
 import copy
 import csv
 import datetime
+import time
 import uuid
 
 import bleach
@@ -492,30 +493,65 @@ class Election(HeliosModel):
     # .count() is deliberately outside the span: the span covers per-vote
     # deserialization plus homomorphic addition, which is what a real tally
     # pays, and is the quantity a harness re-execution cannot reproduce.
-    n_votes = self.voter_set.exclude(vote=None).count()
+    # Gated: this COUNT exists only to label the measurement. Ungated it would
+    # add a database round-trip to every tally even with instrumentation off,
+    # which would change baseline Helios rather than observe it.
+    measuring = measure.enabled()
+    n_votes = self.voter_set.exclude(vote=None).count() if measuring else None
+
+    # The cryptography alone. With verify_p=False, Tally.add_vote is pure
+    # homomorphic multiplication, which makes this call the same clean boundary
+    # on the aggregation side that sk.decryption_factor() is on the decryption
+    # side. Without it, a slower cryptosystem and a wider ciphertext are
+    # indistinguishable: both show up only as a larger aggregation_time_ns.
+    #
+    # An accumulator, not a span per vote. A span writes a record and fsyncs
+    # it, so at N=250,000 it would put a quarter of a million file writes
+    # inside the very window it is meant to decompose. Two perf_counter_ns()
+    # calls per vote cost ~40 ms against ~400 s of aggregation.
+    #
+    # Bound once, before the loop: with instrumentation off `add_vote` IS
+    # tally.add_vote, so the loop below is byte-for-byte the work upstream does
+    # and pays nothing per vote -- no per-vote enabled() check, no branch. The
+    # call appears once either way, so the timed and untimed paths cannot drift
+    # apart.
+    aggregation_only_ns = 0
+    add_vote = tally.add_vote
+    if measuring:
+      def add_vote(encrypted_vote, verify_p, _add=tally.add_vote):
+        nonlocal aggregation_only_ns
+        _t0 = time.perf_counter_ns()
+        _add(encrypted_vote, verify_p=verify_p)
+        aggregation_only_ns += time.perf_counter_ns() - _t0
+
     # verify_p is recorded because production hardcodes False here ("assuming
     # votes already verified"); proof checking is paid at cast time in Celery.
     # Emitting it keeps that claim auditable from the measurement data.
+    # includes= is descriptive: the queryset is lazy, so rows stream from the
+    # database and Voter instances are constructed as the loop runs, inside
+    # this span. LDObjectField defines from_db_value, so each vote's JSON is
+    # parsed eagerly during query result processing -- as the instance is
+    # built, not on attribute access -- which puts per-vote deserialization
+    # and queryset iteration inside the window along with the homomorphic
+    # addition. A real tally cannot avoid any of it; aggregation_only_ns
+    # separates the cryptography from the rest rather than pretending the two
+    # are one cost.
     with measure.span(self.uuid, 'aggregation_time_ns', n_votes=n_votes,
-                      verify_p=False):
+                      verify_p=False,
+                      includes='per_vote_json_deserialization'):
       for voter in self.voter_set.exclude(vote=None):
-        tally.add_vote(voter.vote, verify_p=False)
+        add_vote(voter.vote, verify_p=False)
 
-    # The span's record is fsynced before this save(). The harness polls on
-    # encrypted_tally, so the timing is readable by the time the completion
-    # signal becomes visible. No race.
+    # Recorded after the span closes, never inside it: record() fsyncs, and a
+    # write inside aggregation_time_ns would charge that cost to the window
+    # this metric exists to decompose. Same reason the payload byte counts in
+    # tasks.py sit outside their task spans.
+    if measuring:
+      measure.record(self.uuid, 'aggregation_only_ns', aggregation_only_ns,
+                     n_votes=n_votes)
+
     self.encrypted_tally = tally
     self.save()
-
-    # The bulletin board's bulk. Same serialization Helios stores, for the
-    # same reason as the factor/proof payloads above.
-    if measure.enabled():
-      measure.record(
-        self.uuid, 'encrypted_tally_bytes',
-        len(datatypes.LDObject.instantiate(
-          tally, datatype='legacy/Tally').serialize()),
-        unit='bytes', n_votes=n_votes,
-        n_cells=sum(len(q) for q in tally.tally))
 
   def ready_for_decryption(self):
     return self.encrypted_tally is not None
@@ -672,9 +708,6 @@ class Election(HeliosModel):
     :type params: Cryptosystem
     """
     # FIXME: generate the keypair
-    # The election's REAL key, generated in the real flow -- the one key this
-    # election actually used. A distribution comes from repeating cells, not
-    # from sampling the primitive outside the code path that runs it.
     with measure.span(self.uuid, 'keygen_time_ns', context='election'):
       keypair = params.generate_keypair()
 
@@ -707,6 +740,10 @@ class Election(HeliosModel):
     return self.get_helios_trustee() is not None
 
   def helios_trustee_decrypt(self):
+    # NOT timed: LDObjectField defines from_db_value, so the tally was already
+    # deserialized during Election.objects.get() in the task. This is an
+    # attribute read. The query's cost is measured there, as
+    # election_load_time_ns.
     tally = self.encrypted_tally
     tally.init_election(self)
 
@@ -722,23 +759,6 @@ class Election(HeliosModel):
     trustee.decryption_factors = factors
     trustee.decryption_proofs = proof
     trustee.save()
-
-    # What a trustee publishes to the board, measured the way Helios itself
-    # serializes it: LDObjectField.get_prep_value does
-    # LDObject.instantiate(value, datatype=type_hint).serialize(), so a
-    # json.dumps here would report a different size than what is stored.
-    if measure.enabled():
-      _f_type = datatypes.arrayOf(datatypes.arrayOf('core/BigInteger'))
-      _p_type = datatypes.arrayOf(datatypes.arrayOf('legacy/EGZKProof'))
-      n_cells = sum(len(q) for q in tally.tally)
-      measure.record(
-        self.uuid, 'decryption_factors_bytes',
-        len(datatypes.LDObject.instantiate(factors, datatype=_f_type).serialize()),
-        unit='bytes', n_cells=n_cells)
-      measure.record(
-        self.uuid, 'decryption_proofs_bytes',
-        len(datatypes.LDObject.instantiate(proof, datatype=_p_type).serialize()),
-        unit='bytes', n_cells=n_cells)
 
   def append_log(self, text):
     item = ElectionLog(election = self, log=text, at=datetime.datetime.utcnow())
@@ -1274,7 +1294,13 @@ class CastVote(HeliosModel):
     if self.is_quarantined:
       raise Exception("cast vote is quarantined, verification and storage is delayed.")
 
-    result = self.vote.verify(self.voter.election)
+    # Proof checking alone. The enclosing verification_time_ns (tasks.py) also
+    # covers the two row writes below; this span isolates the cryptography, so
+    # the claim that verification is essentially all ZKP work is measured
+    # rather than asserted.
+    with measure.span(self.voter.election.uuid, 'verification_only_ns',
+                      cast_vote_id=self.id):
+      result = self.vote.verify(self.voter.election)
 
     if result:
       self.verified_at = datetime.datetime.utcnow()
