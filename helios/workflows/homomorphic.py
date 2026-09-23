@@ -7,6 +7,7 @@ reworked 2011-01-09
 """
 
 import logging
+import time
 from helios import measure
 from helios.crypto import algs
 from . import WorkflowObject
@@ -333,52 +334,50 @@ class Tally(WorkflowObject):
     signature backward-compatible and makes the spans no-ops for any caller
     that does not pass it.
     """
-    # Factor-only pass: the same modexp work as the real pass below, without
-    # the Chaum-Pedersen proofs. Results are discarded; the difference between
-    # this and decryption_factor_time_ns is proof generation.
-    #
-    # This is the ONE place in the instrumentation that does extra WORK rather
-    # than only reading a clock, so it is gated on measure.enabled(). With
-    # HELIOS_MEASURE_PATH unset the loop does not run at all and Helios is
-    # unchanged. It runs FIRST so it cannot benefit from cache warming done by
-    # the real pass.
-    #
-    # Cost is Theta(answer slots), not Theta(N): 6 cells on the smoke face,
-    # 222 on nle2025 -- once per election, independent of voter count.
-    if measure.enabled():
-      # overhead=True: this pass exists only to measure. It is still reported
-      # as its own metric, but it is charged to the enclosing spans so
-      # task_helios_decrypt_ns does not bill Helios for it.
-      with measure.span(election_uuid, 'decryption_factor_only_ns',
-                        overhead=True,
-                        n_cells=sum(len(q) for q in self.tally)):
-        for q in self.tally:
-          for c in q:
-            sk.decryption_factor(c)
+    measuring = measure.enabled()
+
+    # Factor-only time, measured on the real pass.
+    factor_only_ns = 0
+    if measuring:
+      def timed_factor(ciphertext, _real=sk.decryption_factor):
+        nonlocal factor_only_ns
+        t0 = time.perf_counter_ns()
+        out = _real(ciphertext)
+        factor_only_ns += time.perf_counter_ns() - t0
+        return out
+      sk.decryption_factor = timed_factor  # this key only
 
     # for all choices of all questions (double list comprehension)
     decryption_factors = []
     decryption_proof = []
-    
-    # Timed here rather than around the call site, so the factor-only pass
-    # above is excluded from it and the two are directly comparable.
-    with measure.span(election_uuid, 'decryption_factor_time_ns'):
-      for question_num, question in enumerate(self.questions):
-        answers = question['answers']
-        question_factors = []
-        question_proof = []
 
-        for answer_num, answer in enumerate(answers):
-          # do decryption and proof of it
-          dec_factor, proof = sk.decryption_factor_and_proof(self.tally[question_num][answer_num])
+    # Factor + Chaum-Pedersen proof, the real call.
+    try:
+      with measure.span(election_uuid, 'decryption_factor_time_ns'):
+        for question_num, question in enumerate(self.questions):
+          answers = question['answers']
+          question_factors = []
+          question_proof = []
 
-          # look up appropriate discrete log
-          # this is the string conversion
-          question_factors.append(dec_factor)
-          question_proof.append(proof)
+          for answer_num, answer in enumerate(answers):
+            # do decryption and proof of it
+            dec_factor, proof = sk.decryption_factor_and_proof(self.tally[question_num][answer_num])
 
-        decryption_factors.append(question_factors)
-        decryption_proof.append(question_proof)
+            # look up appropriate discrete log
+            # this is the string conversion
+            question_factors.append(dec_factor)
+            question_proof.append(proof)
+
+          decryption_factors.append(question_factors)
+          decryption_proof.append(question_proof)
+    finally:
+      if measuring:
+        del sk.decryption_factor  # restore the class method
+
+    if measuring:
+      measure.record(election_uuid, 'decryption_factor_only_ns',
+                     factor_only_ns,
+                     n_cells=sum(len(q) for q in self.tally))
 
     return decryption_factors, decryption_proof
     

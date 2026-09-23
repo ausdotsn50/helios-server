@@ -489,69 +489,46 @@ class Election(HeliosModel):
     """
     tally the election, assuming votes already verified
     """
-    tally = self.init_tally()
-    # .count() is deliberately outside the span: the span covers per-vote
-    # deserialization plus homomorphic addition, which is what a real tally
-    # pays, and is the quantity a harness re-execution cannot reproduce.
-    # Gated: this COUNT exists only to label the measurement. Ungated it would
-    # add a database round-trip to every tally even with instrumentation off,
-    # which would change baseline Helios rather than observe it.
+    tally = self.init_tally()  # empty tally
+
+    # Is measurement on? (HELIOS_MEASURE_PATH set)
     measuring = measure.enabled()
+    # Ballot count, only as a label on the records. Skipped when off so real
+    # Helios never pays for this extra query.
     n_votes = self.voter_set.exclude(vote=None).count() if measuring else None
 
-    # The cryptography alone. With verify_p=False, Tally.add_vote is pure
-    # homomorphic multiplication, which makes this call the same clean boundary
-    # on the aggregation side that sk.decryption_factor() is on the decryption
-    # side. Without it, a slower cryptosystem and a wider ciphertext are
-    # indistinguishable: both show up only as a larger aggregation_time_ns.
-    #
-    # An accumulator, not a span per vote. A span writes a record and fsyncs
-    # it, so at N=250,000 it would put a quarter of a million file writes
-    # inside the very window it is meant to decompose. Two perf_counter_ns()
-    # calls per vote cost ~40 ms against ~400 s of aggregation.
-    #
-    # Bound once, before the loop: with instrumentation off `add_vote` IS
-    # tally.add_vote, so the loop below is byte-for-byte the work upstream does
-    # and pays nothing per vote -- no per-vote enabled() check, no branch. The
-    # call appears once either way, so the timed and untimed paths cannot drift
-    # apart.
+    # Small stopwatch: running total of crypto-only time across all votes.
     aggregation_only_ns = 0
-    add_vote = tally.add_vote
-    if measuring:
-      def add_vote(encrypted_vote, verify_p, _add=tally.add_vote):
-        nonlocal aggregation_only_ns
-        _t0 = time.perf_counter_ns()
-        _add(encrypted_vote, verify_p=verify_p)
-        aggregation_only_ns += time.perf_counter_ns() - _t0
 
-    # verify_p is recorded because production hardcodes False here ("assuming
-    # votes already verified"); proof checking is paid at cast time in Celery.
-    # Emitting it keeps that claim auditable from the measurement data.
-    # includes= is descriptive: the queryset is lazy, so rows stream from the
-    # database and Voter instances are constructed as the loop runs, inside
-    # this span. LDObjectField defines from_db_value, so each vote's JSON is
-    # parsed eagerly during query result processing -- as the instance is
-    # built, not on attribute access -- which puts per-vote deserialization
-    # and queryset iteration inside the window along with the homomorphic
-    # addition. A real tally cannot avoid any of it; aggregation_only_ns
-    # separates the cryptography from the rest rather than pretending the two
-    # are one cost.
+    # Measurement OFF: add_vote is Helios's real function, loop = original.
+    add_vote = tally.add_vote
+    # Measurement ON: add_vote becomes a wrapper that times each real call.
+    if measuring:
+      # _add keeps the real function; inside here "add_vote" means the wrapper.
+      def add_vote(encrypted_vote, verify_p, _add=tally.add_vote):
+        nonlocal aggregation_only_ns                # add to the total above
+        _t0 = time.perf_counter_ns()                # start small stopwatch
+        _add(encrypted_vote, verify_p=verify_p)     # REAL homomorphic addition
+        aggregation_only_ns += time.perf_counter_ns() - _t0  # stop, add to total
+
+    # Big stopwatch: the whole loop -> aggregation_time_ns.
     with measure.span(self.uuid, 'aggregation_time_ns', n_votes=n_votes,
                       verify_p=False,
                       includes='per_vote_json_deserialization'):
+      # Each step fetches the next voter row and parses its ballot
+      # (deserialization, NOT crypto; only the big stopwatch sees it).
       for voter in self.voter_set.exclude(vote=None):
+        # Crypto: multiply this ballot into the tally (both stopwatches see it).
         add_vote(voter.vote, verify_p=False)
 
-    # Recorded after the span closes, never inside it: record() fsyncs, and a
-    # write inside aggregation_time_ns would charge that cost to the window
-    # this metric exists to decompose. Same reason the payload byte counts in
-    # tasks.py sit outside their task spans.
+    # Save the crypto total once, after the big stopwatch stops, so this
+    # disk write isn't counted inside aggregation_time_ns.
     if measuring:
       measure.record(self.uuid, 'aggregation_only_ns', aggregation_only_ns,
                      n_votes=n_votes)
 
-    self.encrypted_tally = tally
-    self.save()
+    self.encrypted_tally = tally  # original Helios
+    self.save()                   # original Helios
 
   def ready_for_decryption(self):
     return self.encrypted_tally is not None
@@ -748,11 +725,10 @@ class Election(HeliosModel):
     tally.init_election(self)
 
     trustee = self.get_helios_trustee()
-    # decryption_factor_time_ns and decryption_factor_only_ns are both recorded
-    # INSIDE decryption_factors_and_proofs, so the factor-only pass is excluded
-    # from the real one. Records are written before trustee.save(), and the
-    # harness polls on decryption_factors, so timings are readable by the time
-    # the completion signal appears.
+    # decryption_factor_time_ns and decryption_factor_only_ns are both
+    # recorded inside decryption_factors_and_proofs, on the same single
+    # pass, before trustee.save(). The harness polls on decryption_factors,
+    # so timings are readable by the time the completion signal appears.
     factors, proof = tally.decryption_factors_and_proofs(
       trustee.secret_key, election_uuid=self.uuid)
 
