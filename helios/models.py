@@ -493,9 +493,6 @@ class Election(HeliosModel):
 
     # Is measurement on? (HELIOS_MEASURE_PATH set)
     measuring = measure.enabled()
-    # Ballot count, only as a label on the records. Skipped when off so real
-    # Helios never pays for this extra query.
-    n_votes = self.voter_set.exclude(vote=None).count() if measuring else None
 
     # Small stopwatch: running total of crypto-only time across all votes.
     aggregation_only_ns = 0
@@ -512,20 +509,22 @@ class Election(HeliosModel):
         aggregation_only_ns += time.perf_counter_ns() - _t0  # stop, add to total
 
     # Big stopwatch: the whole loop -> aggregation_time_ns.
-    with measure.span(self.uuid, 'aggregation_time_ns', n_votes=n_votes,
-                      verify_p=False,
-                      includes='per_vote_json_deserialization'):
+    with measure.span(self.uuid, 'aggregation_time_ns', verify_p=False,
+                      includes='per_vote_json_deserialization') as sp:
       # Each step fetches the next voter row and parses its ballot
       # (deserialization, NOT crypto; only the big stopwatch sees it).
       for voter in self.voter_set.exclude(vote=None):
         # Crypto: multiply this ballot into the tally (both stopwatches see it).
         add_vote(voter.vote, verify_p=False)
+      # Ballot count as a label. add_vote already counted, so no extra query.
+      if measuring:
+        sp.extra['n_votes'] = tally.num_tallied
 
     # Save the crypto total once, after the big stopwatch stops, so this
     # disk write isn't counted inside aggregation_time_ns.
     if measuring:
       measure.record(self.uuid, 'aggregation_only_ns', aggregation_only_ns,
-                     n_votes=n_votes)
+                     n_votes=tally.num_tallied)
 
     self.encrypted_tally = tally  # original Helios
     self.save()                   # original Helios

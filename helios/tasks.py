@@ -139,13 +139,6 @@ def election_compute_tally(election_id):
                    outside_task=True,
                    note='SELECT + eager LDObjectField deserialization')
 
-    # Task entry wall clock. The harness knows when it issued the POST;
-    # started_at minus that timestamp is Celery dispatch latency. Cross-process
-    # wall clock, so accurate to clock resolution rather than perf_counter
-    # precision -- both processes are on one machine, and this is disclosed as
-    # wall-clock in the methodology.
-    measure.record(election.uuid, 'task_start_wall_ns', 0,
-                   task='election_compute_tally', started_at=time.time())
     with measure.span(election.uuid, 'task_compute_tally_ns',
                       task='election_compute_tally'):
         election.compute_tally()          # contains aggregation_time_ns
@@ -193,8 +186,6 @@ def tally_helios_decrypt(election_id):
                    outside_task=True,
                    note='SELECT + eager LDObjectField deserialization')
 
-    measure.record(election.uuid, 'task_start_wall_ns', 0,
-                   task='tally_helios_decrypt', started_at=time.time())
     with measure.span(election.uuid, 'task_helios_decrypt_ns',
                       task='tally_helios_decrypt'):
         election.helios_trustee_decrypt()  # contains decryption_factor_time_ns

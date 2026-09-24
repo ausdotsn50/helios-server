@@ -26,10 +26,9 @@ _ENABLED = bool(_PATH)
 # Instrumentation-only cost accrued in the current thread.
 #
 # THE INVARIANT THIS ENFORCES: a span must never report work that exists only
-# because instrumentation is enabled. Two things violate it -- writing a record
-# (~0.06 ms) and any measurement-only computation, such as the proof-free pass
-# in decryption_factors_and_proofs. Both happen INSIDE whatever span encloses
-# them, so without correction every parent is inflated by its children.
+# because instrumentation is enabled. The only such cost is writing a record
+# (~0.06 ms), which happens INSIDE whatever span encloses it, so without
+# correction every parent is inflated by its children.
 #
 # Enforcing it by review failed twice: one instance was found and fixed, then
 # another appeared in a place the first audit had not looked. So it is enforced
@@ -93,15 +92,10 @@ class span:
     Reports the window MINUS any instrumentation-only cost incurred inside it,
     so a span never charges Helios for measurement. `instrumentation_ns` is
     recorded alongside, so the raw window is always recoverable.
-
-    overhead=True marks a span whose own work exists only for measurement --
-    the proof-free pass, for instance. It is still recorded as a metric, and it
-    is additionally charged to its enclosing spans.
     """
 
-    def __init__(self, election_uuid, metric, overhead=False, **extra):
+    def __init__(self, election_uuid, metric, **extra):
         self.uuid, self.metric, self.extra = election_uuid, metric, extra
-        self.overhead = overhead
 
     def __enter__(self):
         self._ovh0 = getattr(_local, 'overhead', 0)
@@ -114,6 +108,4 @@ class span:
             inner = getattr(_local, 'overhead', 0) - self._ovh0
             record(self.uuid, self.metric, max(raw - inner, 0),
                    instrumentation_ns=inner, **self.extra)
-            if self.overhead:
-                _charge(raw)
         return False
