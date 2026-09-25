@@ -446,6 +446,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "phe" },
     { name = "pytest" },
 ]
 workload = [
@@ -480,7 +481,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.0.0" }]
+dev = [
+    { name = "phe", specifier = ">=1.5.0" },
+    { name = "pytest", specifier = ">=8.0.0" },
+]
 workload = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "selenium", specifier = ">=4.47.0" },
@@ -565,6 +569,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a1/d4/1fc4078c65507b51b96ca8f8c3ba19e6a61c8253c72794544580a7b6c24d/packaging-25.0.tar.gz", hash = "sha256:d443872c98d677bf60f6a1f2f8c1cb748e8fe762d2bf9d3148b5599295b0fc4f", size = 165727, upload-time = "2025-04-19T11:48:59.673Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/20/12/38679034af332785aac8774540895e234f4d07f7545804097de4b666afd8/packaging-25.0-py3-none-any.whl", hash = "sha256:29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484", size = 66469, upload-time = "2025-04-19T11:48:57.875Z" },
+]
+
+[[package]]
+name = "phe"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/47/3efede484a4ca820f0f05c59f3daf60b560f3e397e1eb8df7b37b5657068/phe-1.5.0.tar.gz", hash = "sha256:992fb7091d2427f0d9733946f8f350acdd4d1d012057f2aad364ba79f970339c", size = 51263, upload-time = "2022-04-20T01:45:34.463Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/7c/1c514f3e030ff69ee2a184fca3f1514c1d32653ca00869d884b4f981e564/phe-1.5.0-py2.py3-none-any.whl", hash = "sha256:a0d0098e22474b3027cbc0b05e9de2290bc603f1728bf401f498abbdbe795391", size = 53737, upload-time = "2022-04-20T01:45:33.152Z" },
 ]
 
 [[package]]

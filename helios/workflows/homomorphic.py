@@ -7,7 +7,6 @@ reworked 2011-01-09
 """
 
 import logging
-from helios.crypto import algs
 from . import WorkflowObject
 
 class EncryptedAnswer(WorkflowObject):
@@ -24,19 +23,9 @@ class EncryptedAnswer(WorkflowObject):
     
   @classmethod
   def generate_plaintexts(cls, pk, min=0, max=1):
-    plaintexts = []
-    running_product = 1
-    
-    # run the product up to the min
-    for i in range(max+1):
-      # if we're in the range, add it to the array
-      if i >= min:
-        plaintexts.append(algs.EGPlaintext(running_product, pk))
-        
-      # next value in running product
-      running_product = (running_product * pk.g) % pk.p
-      
-    return plaintexts
+    # Delegated to the public key: ElGamal builds g^0, g^1, ... because it
+    # cannot encrypt zero, while Paillier uses the integers themselves.
+    return pk.generate_plaintexts(min=min, max=max)
 
   def verify_plaintexts_and_randomness(self, pk):
     """
@@ -65,7 +54,7 @@ class EncryptedAnswer(WorkflowObject):
       individual_proof = self.individual_proofs[choice_num]
       
       # verify the proof on the encryption of that choice
-      if not choice.verify_disjunctive_encryption_proof(possible_plaintexts, individual_proof, algs.EG_disjunctive_challenge_generator):
+      if not choice.verify_disjunctive_encryption_proof(possible_plaintexts, individual_proof, pk.disjunctive_challenge_generator):
         return False
 
       # compute homomorphic sum if needed
@@ -77,7 +66,7 @@ class EncryptedAnswer(WorkflowObject):
       sum_possible_plaintexts = self.generate_plaintexts(pk, min=min, max=max)
 
       # verify the sum
-      return homomorphic_sum.verify_disjunctive_encryption_proof(sum_possible_plaintexts, self.overall_proof, algs.EG_disjunctive_challenge_generator)
+      return homomorphic_sum.verify_disjunctive_encryption_proof(sum_possible_plaintexts, self.overall_proof, pk.disjunctive_challenge_generator)
     else:
       # approval voting, no need for overall proof verification
       return True
@@ -107,7 +96,7 @@ class EncryptedAnswer(WorkflowObject):
     
     # homomorphic sum of all
     homomorphic_sum = 0
-    randomness_sum = 0
+    randomness_sum = pk.randomness_identity
 
     # min and max for number of answers, useful later
     min_answers = 0
@@ -125,17 +114,17 @@ class EncryptedAnswer(WorkflowObject):
         num_selected_answers += 1
 
       # randomness and encryption
-      randomness[answer_num] = algs.random.mpz_lt(pk.q)
+      randomness[answer_num] = pk.random_randomness()
       choices[answer_num] = pk.encrypt_with_r(plaintexts[plaintext_index], randomness[answer_num])
       
       # generate proof
       individual_proofs[answer_num] = choices[answer_num].generate_disjunctive_encryption_proof(plaintexts, plaintext_index, 
-                                                randomness[answer_num], algs.EG_disjunctive_challenge_generator)
+                                                randomness[answer_num], pk.disjunctive_challenge_generator)
                                                 
       # sum things up homomorphically if needed
       if max_answers is not None:
         homomorphic_sum = choices[answer_num] * homomorphic_sum
-        randomness_sum = (randomness_sum + randomness[answer_num]) % pk.q
+        randomness_sum = pk.combine_randomness(randomness_sum, randomness[answer_num])
 
     # prove that the sum is 0 or 1 (can be "blank vote" for this answer)
     # num_selected_answers is 0 or 1, which is the index into the plaintext that is actually encoded
@@ -147,7 +136,7 @@ class EncryptedAnswer(WorkflowObject):
       sum_plaintexts = cls.generate_plaintexts(pk, min=min_answers, max=max_answers)
     
       # need to subtract the min from the offset
-      overall_proof = homomorphic_sum.generate_disjunctive_encryption_proof(sum_plaintexts, num_selected_answers - min_answers, randomness_sum, algs.EG_disjunctive_challenge_generator);
+      overall_proof = homomorphic_sum.generate_disjunctive_encryption_proof(sum_plaintexts, num_selected_answers - min_answers, randomness_sum, pk.disjunctive_challenge_generator);
     else:
       # approval voting
       overall_proof = None
@@ -397,8 +386,10 @@ class Tally(WorkflowObject):
         #proof = algs.EGZKProof.fromJSONDict(decryption_proofs[q_num][a_num])
         proof = decryption_proofs[q_num][a_num]
         
-        # check that g, alpha, y, dec_factor is a DH tuple
-        if not proof.verify(public_key.g, answer_tally.alpha, public_key.y, int(decryption_factors[q_num][a_num]), public_key.p, public_key.q, challenge_generator):
+        # check the decryption factor against the tally ciphertext.
+        # ElGamal: that (g, alpha, y, dec_factor) is a DH tuple.
+        # Paillier: that z^n = a * (c * (1 - m*n))^e (mod n^2).
+        if not public_key.verify_decryption_proof(answer_tally, decryption_factors[q_num][a_num], proof, challenge_generator):
           return False
     
     return True
@@ -411,10 +402,12 @@ class Tally(WorkflowObject):
     Each decryption factor set is a list of lists of decryption factors (questions/answers).
     """
     
-    # pre-compute a dlog table
-    dlog_table = DLogTable(base = public_key.g, modulus = public_key.p)
-    dlog_table.precompute(self.num_tallied)
-    
+    # obtain the decoder that turns a decrypted value into a tally.
+    # ElGamal: a precomputed dlog table, Theta(N) to build, O(1) to look up.
+    # Paillier: the identity -- single-trustee decryption already yields the
+    # plaintext, so there is no discrete logarithm to resolve.
+    decoder = public_key.tally_decoder(self.num_tallied)
+
     result = []
     
     # go through each one
@@ -426,7 +419,7 @@ class Tally(WorkflowObject):
         dec_factor_list = [df[q_num][a_num] for df in decryption_factors]
         raw_value = self.tally[q_num][a_num].decrypt(dec_factor_list, public_key)
         
-        q_result.append(dlog_table.lookup(raw_value))
+        q_result.append(decoder(raw_value))
 
       result.append(q_result)
     
@@ -434,7 +427,38 @@ class Tally(WorkflowObject):
 
   def _process_value_in(self, field_name, field_value):
     if field_name == 'tally':
-      return [[algs.EGCiphertext.fromJSONDict(a) for a in q] for q in field_value]
+      cls = self._ciphertext_class_for(field_value)
+      return [[cls.fromJSONDict(a) for a in q] for q in field_value]
+
+  def _ciphertext_class_for(self, tally_value):
+    """
+    Which ciphertext class to rebuild a stored tally with.
+
+    Normally the public key knows. But deserialization can run BEFORE
+    self.public_key is populated -- LDObject.loadDataFromDict walks FIELDS in
+    order and 'tally' may be reached first -- so when the key is absent, fall
+    back to the shape of the data itself, consistent with the dispatch in
+    helios/datatypes/__init__.py. ElGamal ciphertexts carry 'alpha'; Paillier
+    ciphertexts carry 'c'.
+    """
+    pk = getattr(self, 'public_key', None)
+    if pk:
+      return pk.ciphertext_class
+
+    for q in tally_value:
+      for a in q:
+        if isinstance(a, dict):
+          if 'alpha' in a:
+            from helios.crypto import algs
+            return algs.EGCiphertext
+          if 'c' in a:
+            from helios.crypto import paillier
+            return paillier.PaillierCiphertext
+
+    # An empty tally rebuilds as nothing either way, so the default is
+    # immaterial; ElGamal keeps historical behaviour.
+    from helios.crypto import algs
+    return algs.EGCiphertext
       
   def _process_value_out(self, field_name, field_value):
     if field_name == 'tally':

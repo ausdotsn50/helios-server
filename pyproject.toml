@@ -33,6 +33,12 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    # phe is GPLv3 and this codebase is Apache-2.0. It is a TEST ORACLE ONLY:
+    # imported by helios/tests_paillier.py to cross-check the Paillier
+    # implementation against an independent one (build spec §7, test 14).
+    # No line of it may be copied into the source tree, and nothing under
+    # helios/ may import it.
+    "phe>=1.5.0",
 ]
 workload = [
     "pyyaml>=6.0.3",

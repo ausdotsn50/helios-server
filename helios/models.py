@@ -65,6 +65,66 @@ class Election(HeliosModel):
   election_type = models.CharField(max_length=250, null=False, default='election', choices = ELECTION_TYPES)
   private_p = models.BooleanField(default=False, null=False)
 
+  # which cryptosystem this election uses.
+  #
+  # Dispatch does NOT read this field -- serialization routes on the wrapped
+  # object's own datatype and on the shape of stored data (see
+  # helios/datatypes/__init__.py), which is what lets an existing ElGamal
+  # election keep working with no data migration. This column exists so the
+  # scheme is queryable, appears in the election record, and gives the
+  # measurement harness something to assert a run against: a run must not be
+  # able to claim a scheme it did not execute.
+  CRYPTO_SCHEMES = (
+    ('elgamal', 'Exponential ElGamal'),
+    ('paillier', 'Paillier'),
+    )
+
+  crypto_scheme = models.CharField(max_length=20, null=False, default='elgamal',
+                                   choices=CRYPTO_SCHEMES)
+
+  # --- optimization ablations (masterplan §6.3) ----------------------------
+  #
+  # These are PER-ELECTION rather than per-deployment, and stored rather than
+  # read from settings, for the same reason crypto_scheme is: an experiment
+  # varies them cell by cell, and a measurement must be checkable after the
+  # fact against what the election actually did. A process-wide setting is
+  # invisible to the results, cannot be verified from a stored election, and
+  # can be set on the wrong process -- all three of which defeat the guard in
+  # PAILLIER_BUILD_SPEC.md §8.1, that a run must not be able to claim
+  # something it did not execute.
+  #
+  # Both are ignored entirely by ElGamal elections.
+
+  # DJN §4.1 alternative encryption function: h^r with a short exponent instead
+  # of v^n. Worth ~3.85x on the ciphertext but only ~1.31x on the reported
+  # encryption metric, which is ~68% proof generation. Costs an assumption
+  # beyond decisional composite residuosity, so it is off by default.
+  paillier_use_djn41 = models.BooleanField(default=False, null=False)
+
+  # CRT acceleration of the DECRYPTION PROOF (decryption itself is always
+  # CRT-accelerated). Worth ~1.72x, and available to the trustee by definition
+  # since only the trustee holds the factorization -- so unlike DJN §4.1 it
+  # costs no additional assumption and is ON by default. Switchable so the
+  # ablation can measure what it is worth rather than assert it.
+  paillier_use_crt_proofs = models.BooleanField(default=True, null=False)
+
+  @property
+  def ablation_config(self):
+    """
+    The optimization configuration this election ran under.
+
+    Emitted into every measurement record and cross-checked by the harness's
+    acceptance test, so a results file is self-describing about which
+    optimizations were active.
+    """
+    if self.crypto_scheme != 'paillier':
+      return {}
+
+    return {
+      'paillier_use_djn41': self.paillier_use_djn41,
+      'paillier_use_crt_proofs': self.paillier_use_crt_proofs,
+    }
+
   description = models.TextField()
   public_key = LDObjectField(type_hint = 'legacy/EGPublicKey',
                              null=True)
@@ -430,6 +490,23 @@ class Election(HeliosModel):
           'action': "add at least one trustee"
           })
 
+    # Paillier supports exactly one trustee, and this is where the admin should
+    # find that out -- before freeze, rather than as an exception during it.
+    #
+    # The restriction is forced by the cryptosystem, not chosen for convenience.
+    # ElGamal-Helios combines trustee keys at freeze because every trustee
+    # generates a secret in the same hardcoded group, so y = prod(yi)
+    # corresponds to x = sum(xi). Paillier trustees would produce unrelated
+    # moduli n_i, and no operation combines RSA-shaped moduli into a joint
+    # public key. Paillier's multi-party counterpart is the threshold variant,
+    # which needs genuine distributed key generation -- out of scope.
+    # See PAILLIER_BUILD_SPEC.md §4.6.
+    if self.crypto_scheme == 'paillier' and len(trustees) > 1:
+      issues.append({
+          'type': 'trustees',
+          'action': 'remove the extra trustees — Paillier elections support exactly one'
+          })
+
     for t in trustees:
       if t.public_key is None:
         issues.append({
@@ -657,9 +734,17 @@ class Election(HeliosModel):
     trustee.secret_key = keypair.sk
 
     # FIXME: is this at the right level of abstraction?
-    trustee.public_key_hash = datatypes.LDObject.instantiate(trustee.public_key, datatype='legacy/EGPublicKey').hash
+    # The datatype and the challenge generator now come from the cryptosystem
+    # rather than being hardcoded to ElGamal. For ElGamal both resolve to
+    # exactly what was hardcoded here before (see helios/crypto/scheme_adapters.py);
+    # for Paillier the datatype is 'paillier/PublicKey' and the challenge
+    # generator is None, because Paillier generates no trustee proof of
+    # knowledge of the secret key -- prove_sk returns None and pok persists as
+    # null. An empty proof object is deliberately not fabricated: it would
+    # verify vacuously. See PAILLIER_BUILD_SPEC.md §4.4.
+    trustee.public_key_hash = datatypes.LDObject.instantiate(trustee.public_key, datatype=params.public_key_datatype).hash
 
-    trustee.pok = trustee.secret_key.prove_sk(algs.DLog_challenge_generator)
+    trustee.pok = trustee.secret_key.prove_sk(params.dlog_challenge_generator)
 
     trustee.save()
 
@@ -678,6 +763,15 @@ class Election(HeliosModel):
     tally.init_election(self)
 
     trustee = self.get_helios_trustee()
+
+    # Apply the election's stored ablation setting to the key about to be used.
+    # The secret key is deserialized fresh from the database on every access,
+    # so this is set here rather than at key generation -- there is no live
+    # object to have carried it. ElGamal keys have no such attribute and are
+    # left alone.
+    if hasattr(trustee.secret_key, 'use_crt_for_proofs'):
+      trustee.secret_key.use_crt_for_proofs = self.paillier_use_crt_proofs
+
     factors, proof = tally.decryption_factors_and_proofs(trustee.secret_key)
 
     trustee.decryption_factors = factors
@@ -1351,7 +1445,12 @@ class Trustee(HeliosModel):
     verify that the decryption proofs match the tally for the election
     """
     # verify_decryption_proofs(self, decryption_factors, decryption_proofs, public_key, challenge_generator):
-    return self.election.encrypted_tally.verify_decryption_proofs(self.decryption_factors, self.decryption_proofs, self.public_key, algs.EG_fiatshamir_challenge_generator)
+    #
+    # The challenge generator comes from the public key rather than being
+    # hardcoded to ElGamal's. This path is not measured, but it is on the
+    # VERIFIABILITY path: leaving it un-ported would give a Paillier election
+    # whose decryption proofs no trustee page could check.
+    return self.election.encrypted_tally.verify_decryption_proofs(self.decryption_factors, self.decryption_proofs, self.public_key, self.public_key.fiatshamir_challenge_generator)
 
 
 class EmailOptOut(models.Model):
