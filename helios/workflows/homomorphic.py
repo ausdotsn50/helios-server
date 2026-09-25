@@ -7,6 +7,8 @@ reworked 2011-01-09
 """
 
 import logging
+import time
+from helios import measure
 from helios.crypto import algs
 from . import WorkflowObject
 
@@ -323,32 +325,60 @@ class Tally(WorkflowObject):
 
     self.num_tallied += 1
 
-  def decryption_factors_and_proofs(self, sk):
+  def decryption_factors_and_proofs(self, sk, election_uuid=None):
     """
     returns an array of decryption factors and a corresponding array of decryption proofs.
     makes the decryption factors into strings, for general Helios / JS compatibility.
+
+    election_uuid is measurement-only and defaults to None, which keeps the
+    signature backward-compatible and makes the spans no-ops for any caller
+    that does not pass it.
     """
+    measuring = measure.enabled()
+
+    # Factor-only time, measured on the real pass.
+    factor_only_ns = 0
+    if measuring:
+      def timed_factor(ciphertext, _real=sk.decryption_factor):
+        nonlocal factor_only_ns
+        t0 = time.perf_counter_ns()
+        out = _real(ciphertext)
+        factor_only_ns += time.perf_counter_ns() - t0
+        return out
+      sk.decryption_factor = timed_factor  # this key only
+
     # for all choices of all questions (double list comprehension)
     decryption_factors = []
     decryption_proof = []
-    
-    for question_num, question in enumerate(self.questions):
-      answers = question['answers']
-      question_factors = []
-      question_proof = []
 
-      for answer_num, answer in enumerate(answers):
-        # do decryption and proof of it
-        dec_factor, proof = sk.decryption_factor_and_proof(self.tally[question_num][answer_num])
+    # Factor + Chaum-Pedersen proof, the real call.
+    try:
+      with measure.span(election_uuid, 'decryption_factor_time_ns'):
+        for question_num, question in enumerate(self.questions):
+          answers = question['answers']
+          question_factors = []
+          question_proof = []
 
-        # look up appropriate discrete log
-        # this is the string conversion
-        question_factors.append(dec_factor)
-        question_proof.append(proof)
-        
-      decryption_factors.append(question_factors)
-      decryption_proof.append(question_proof)
-    
+          for answer_num, answer in enumerate(answers):
+            # do decryption and proof of it
+            dec_factor, proof = sk.decryption_factor_and_proof(self.tally[question_num][answer_num])
+
+            # look up appropriate discrete log
+            # this is the string conversion
+            question_factors.append(dec_factor)
+            question_proof.append(proof)
+
+          decryption_factors.append(question_factors)
+          decryption_proof.append(question_proof)
+    finally:
+      if measuring:
+        del sk.decryption_factor  # restore the class method
+
+    if measuring:
+      measure.record(election_uuid, 'decryption_factor_only_ns',
+                     factor_only_ns,
+                     n_cells=sum(len(q) for q in self.tally))
+
     return decryption_factors, decryption_proof
     
   def decrypt_and_prove(self, sk, discrete_logs=None):
@@ -403,33 +433,46 @@ class Tally(WorkflowObject):
     
     return True
     
-  def decrypt_from_factors(self, decryption_factors, public_key):
+  def decrypt_from_factors(self, decryption_factors, public_key,
+                           election_uuid=None):
     """
     decrypt a tally given decryption factors
-    
+
     The decryption factors are a list of decryption factor sets, for each trustee.
     Each decryption factor set is a list of lists of decryption factors (questions/answers).
+
+    election_uuid is measurement-only and defaults to None, which keeps the
+    signature backward-compatible and makes the spans no-ops for any caller
+    that does not pass it.
     """
-    
-    # pre-compute a dlog table
-    dlog_table = DLogTable(base = public_key.g, modulus = public_key.p)
-    dlog_table.precompute(self.num_tallied)
-    
+
+    # Helios builds the dlog table here, in the web process, synchronously
+    # inside the combine_decryptions request.
+    # pre-compute a dlog table -- Theta(N) by construction
+    with measure.span(election_uuid, 'dlog_precompute_time_ns',
+                      num_tallied=self.num_tallied):
+      dlog_table = DLogTable(base = public_key.g, modulus = public_key.p)
+      dlog_table.precompute(self.num_tallied)
+
     result = []
-    
-    # go through each one
-    for q_num, q in enumerate(self.tally):
-      q_result = []
 
-      for a_num, a in enumerate(q):
-        # coalesce the decryption factors into one list
-        dec_factor_list = [df[q_num][a_num] for df in decryption_factors]
-        raw_value = self.tally[q_num][a_num].decrypt(dec_factor_list, public_key)
-        
-        q_result.append(dlog_table.lookup(raw_value))
+    # Directly measured, not derived: per-cell decrypt() plus the O(1)
+    # table lookups.
+    with measure.span(election_uuid, 'dlog_lookup_time_ns',
+                      n_cells=sum(len(q) for q in self.tally)):
+      # go through each one
+      for q_num, q in enumerate(self.tally):
+        q_result = []
 
-      result.append(q_result)
-    
+        for a_num, a in enumerate(q):
+          # coalesce the decryption factors into one list
+          dec_factor_list = [df[q_num][a_num] for df in decryption_factors]
+          raw_value = self.tally[q_num][a_num].decrypt(dec_factor_list, public_key)
+
+          q_result.append(dlog_table.lookup(raw_value))
+
+        result.append(q_result)
+
     return result
 
   def _process_value_in(self, field_name, field_value):

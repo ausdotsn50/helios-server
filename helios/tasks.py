@@ -11,6 +11,7 @@ from django.conf import settings
 from django.urls import reverse
 from urllib.parse import urlparse
 
+from . import measure
 from . import signals
 from . import utils
 from .models import CastVote, Election, Voter, VoterFile, EmailOptOut
@@ -20,7 +21,17 @@ from .view_utils import render_template_raw
 @shared_task
 def cast_vote_verify_and_store(cast_vote_id, status_update_message=None, **kwargs):
     cast_vote = CastVote.objects.get(id=cast_vote_id)
-    result = cast_vote.verify_and_store()
+    # Proof verification, in the process that actually performs it: the
+    # Celery worker, at cast time. One record per ballot.
+    #
+    # NOT cast_vote.vote.election: CastVote.vote is an EncryptedVote LDObject,
+    # which carries election_uuid but gets .election only from init_election(),
+    # never called on this path. Reading it raises, and because the expression
+    # is evaluated in the argument list it escapes span's own guard and fails
+    # the cast. Use the same path the code below already uses.
+    with measure.span(cast_vote.voter.election.uuid, 'verification_time_ns',
+                      cast_vote_id=cast_vote_id):
+        result = cast_vote.verify_and_store()
 
     voter = cast_vote.voter
     election = voter.election
@@ -111,7 +122,7 @@ def single_voter_notify(voter_uuid, notification_template, extra_vars={}):
 @shared_task
 def election_compute_tally(election_id):
     election = Election.objects.get(id=election_id)
-    election.compute_tally()
+    election.compute_tally()          # contains aggregation_time_ns
 
     election_notify_admin.delay(election_id=election_id,
                                 subject="encrypted tally computed",
@@ -129,7 +140,27 @@ Helios
 @shared_task
 def tally_helios_decrypt(election_id):
     election = Election.objects.get(id=election_id)
-    election.helios_trustee_decrypt()
+    election.helios_trustee_decrypt()  # contains decryption_factor_time_ns
+
+    # Payload sizes, after the crypto so it is not in any span. Serialized the
+    # way Helios stores them (LDObjectField.get_prep_value), so the size
+    # matches what is on disk.
+    if measure.enabled():
+        from helios import datatypes
+        _trustee = election.get_helios_trustee()
+        _f_type = datatypes.arrayOf(datatypes.arrayOf('core/BigInteger'))
+        _p_type = datatypes.arrayOf(datatypes.arrayOf('legacy/EGZKProof'))
+        _n_cells = sum(len(q) for q in election.encrypted_tally.tally)
+        measure.record(
+            election.uuid, 'decryption_factors_bytes',
+            len(datatypes.LDObject.instantiate(
+                _trustee.decryption_factors, datatype=_f_type).serialize()),
+            unit='bytes', n_cells=_n_cells)
+        measure.record(
+            election.uuid, 'decryption_proofs_bytes',
+            len(datatypes.LDObject.instantiate(
+                _trustee.decryption_proofs, datatype=_p_type).serialize()),
+            unit='bytes', n_cells=_n_cells)
     election_notify_admin.delay(election_id=election_id,
                                 subject='Helios Decrypt',
                                 body="""

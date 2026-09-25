@@ -9,6 +9,7 @@ Ben Adida
 import copy
 import csv
 import datetime
+import time
 import uuid
 
 import bleach
@@ -17,6 +18,7 @@ from django.db import models, transaction
 from validate_email import validate_email
 
 from helios import datatypes
+from helios import measure
 from helios import utils
 from helios.datatypes.djangofield import LDObjectField
 # useful stuff in helios_auth
@@ -487,12 +489,45 @@ class Election(HeliosModel):
     """
     tally the election, assuming votes already verified
     """
-    tally = self.init_tally()
-    for voter in self.voter_set.exclude(vote=None):
-      tally.add_vote(voter.vote, verify_p=False)
+    tally = self.init_tally()  # empty tally
 
-    self.encrypted_tally = tally
-    self.save()
+    # Is measurement on? (HELIOS_MEASURE_PATH set)
+    measuring = measure.enabled()
+
+    # Small stopwatch: running total of crypto-only time across all votes.
+    aggregation_only_ns = 0
+
+    # Measurement OFF: add_vote is Helios's real function, loop = original.
+    add_vote = tally.add_vote
+    # Measurement ON: add_vote becomes a wrapper that times each real call.
+    if measuring:
+      # _add keeps the real function; inside here "add_vote" means the wrapper.
+      def add_vote(encrypted_vote, verify_p, _add=tally.add_vote):
+        nonlocal aggregation_only_ns                # add to the total above
+        _t0 = time.perf_counter_ns()                # start small stopwatch
+        _add(encrypted_vote, verify_p=verify_p)     # REAL homomorphic addition
+        aggregation_only_ns += time.perf_counter_ns() - _t0  # stop, add to total
+
+    # Big stopwatch: the whole loop -> aggregation_time_ns.
+    with measure.span(self.uuid, 'aggregation_time_ns', verify_p=False,
+                      includes='per_vote_json_deserialization') as sp:
+      # Each step fetches the next voter row and parses its ballot
+      # (deserialization, NOT crypto; only the big stopwatch sees it).
+      for voter in self.voter_set.exclude(vote=None):
+        # Crypto: multiply this ballot into the tally (both stopwatches see it).
+        add_vote(voter.vote, verify_p=False)
+      # Ballot count as a label. add_vote already counted, so no extra query.
+      if measuring:
+        sp.extra['n_votes'] = tally.num_tallied
+
+    # Save the crypto total once, after the big stopwatch stops, so this
+    # disk write isn't counted inside aggregation_time_ns.
+    if measuring:
+      measure.record(self.uuid, 'aggregation_only_ns', aggregation_only_ns,
+                     n_votes=tally.num_tallied)
+
+    self.encrypted_tally = tally  # original Helios
+    self.save()                   # original Helios
 
   def ready_for_decryption(self):
     return self.encrypted_tally is not None
@@ -525,7 +560,10 @@ class Election(HeliosModel):
     trustees = Trustee.get_by_election(self)
     decryption_factors = [t.decryption_factors for t in trustees]
 
-    self.result = self.encrypted_tally.decrypt_from_factors(decryption_factors, self.public_key)
+    # election_uuid is passed so decrypt_from_factors can attribute its three
+    # internal spans (precompute / lookup / combine) to this election.
+    self.result = self.encrypted_tally.decrypt_from_factors(
+      decryption_factors, self.public_key, election_uuid=self.uuid)
 
     self.append_log(ElectionLog.DECRYPTIONS_COMBINED)
 
@@ -646,7 +684,8 @@ class Election(HeliosModel):
     :type params: Cryptosystem
     """
     # FIXME: generate the keypair
-    keypair = params.generate_keypair()
+    with measure.span(self.uuid, 'keygen_time_ns', context='election'):
+      keypair = params.generate_keypair()
 
     # create the trustee
     trustee = Trustee(election = self)
@@ -659,7 +698,10 @@ class Election(HeliosModel):
     # FIXME: is this at the right level of abstraction?
     trustee.public_key_hash = datatypes.LDObject.instantiate(trustee.public_key, datatype='legacy/EGPublicKey').hash
 
-    trustee.pok = trustee.secret_key.prove_sk(algs.DLog_challenge_generator)
+    # Schnorr proof of knowledge of the secret key. Timed here for the same
+    # reason as keygen above: this is where the deployed system pays it.
+    with measure.span(self.uuid, 'prove_sk_time_ns', context='election'):
+      trustee.pok = trustee.secret_key.prove_sk(algs.DLog_challenge_generator)
 
     trustee.save()
 
@@ -674,11 +716,19 @@ class Election(HeliosModel):
     return self.get_helios_trustee() is not None
 
   def helios_trustee_decrypt(self):
+    # NOT timed: LDObjectField defines from_db_value, so the tally was already
+    # deserialized during Election.objects.get() in the task. This is an
+    # attribute read.
     tally = self.encrypted_tally
     tally.init_election(self)
 
     trustee = self.get_helios_trustee()
-    factors, proof = tally.decryption_factors_and_proofs(trustee.secret_key)
+    # decryption_factor_time_ns and decryption_factor_only_ns are both
+    # recorded inside decryption_factors_and_proofs, on the same single
+    # pass, before trustee.save(). The harness polls on decryption_factors,
+    # so timings are readable by the time the completion signal appears.
+    factors, proof = tally.decryption_factors_and_proofs(
+      trustee.secret_key, election_uuid=self.uuid)
 
     trustee.decryption_factors = factors
     trustee.decryption_proofs = proof
@@ -1218,7 +1268,13 @@ class CastVote(HeliosModel):
     if self.is_quarantined:
       raise Exception("cast vote is quarantined, verification and storage is delayed.")
 
-    result = self.vote.verify(self.voter.election)
+    # Proof checking alone. The enclosing verification_time_ns (tasks.py) also
+    # covers the two row writes below; this span isolates the cryptography, so
+    # the claim that verification is essentially all ZKP work is measured
+    # rather than asserted.
+    with measure.span(self.voter.election.uuid, 'verification_only_ns',
+                      cast_vote_id=self.id):
+      result = self.vote.verify(self.voter.election)
 
     if result:
       self.verified_at = datetime.datetime.utcnow()
