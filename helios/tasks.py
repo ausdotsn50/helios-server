@@ -5,7 +5,6 @@ Celery queued tasks for Helios
 ben@adida.net
 """
 import copy
-import time
 from celery import shared_task
 from celery.utils.log import get_logger
 from django.conf import settings
@@ -122,42 +121,8 @@ def single_voter_notify(voter_uuid, notification_template, extra_vars={}):
 
 @shared_task
 def election_compute_tally(election_id):
-    # The election row carries every LDObjectField, and LDObjectField defines
-    # from_db_value -- so Django deserializes them during this query, not on
-    # later attribute access. Timed with a plain stopwatch rather than a span
-    # so the uuid needed for the record can be read from the result: no extra
-    # query, and Helios's query pattern is unchanged.
-    #
-    # Paired with the same measurement in tally_helios_decrypt. At this point
-    # the row does NOT yet carry a tally, so the difference between the two
-    # records in one run is roughly the cost of the tally's presence.
-    _t0 = time.perf_counter_ns()
     election = Election.objects.get(id=election_id)
-    _load_ns = time.perf_counter_ns() - _t0
-    measure.record(election.uuid, 'election_load_time_ns', _load_ns,
-                   tier='task', task='election_compute_tally',
-                   outside_task=True,
-                   note='SELECT + eager LDObjectField deserialization')
-
-    with measure.span(election.uuid, 'task_compute_tally_ns',
-                      task='election_compute_tally'):
-        election.compute_tally()          # contains aggregation_time_ns
-
-    # Payload measurement, deliberately OUTSIDE the task span: serializing the
-    # tally to measure it is work that exists only when instrumentation is
-    # enabled, and it is Theta(answer slots). Inside the span it inflated
-    # task_compute_tally_ns by an amount that grows with ballot complexity.
-    # election.encrypted_tally is the in-memory Tally assigned by compute_tally,
-    # so no reload is needed.
-    if measure.enabled():
-        from helios import datatypes
-        _tally = election.encrypted_tally
-        measure.record(
-            election.uuid, 'encrypted_tally_bytes',
-            len(datatypes.LDObject.instantiate(
-                _tally, datatype='legacy/Tally').serialize()),
-            unit='bytes',
-            n_cells=sum(len(q) for q in _tally.tally))
+    election.compute_tally()          # contains aggregation_time_ns
 
     election_notify_admin.delay(election_id=election_id,
                                 subject="encrypted tally computed",
@@ -174,27 +139,12 @@ Helios
 
 @shared_task
 def tally_helios_decrypt(election_id):
-    # Same stopwatch as election_compute_tally. Here the row DOES carry the
-    # encrypted tally, so at any realistic N this query is dominated by
-    # deserializing it -- which makes the cost scheme-dependent, since Paillier
-    # ciphertexts serialize at a different size.
-    _t0 = time.perf_counter_ns()
     election = Election.objects.get(id=election_id)
-    _load_ns = time.perf_counter_ns() - _t0
-    measure.record(election.uuid, 'election_load_time_ns', _load_ns,
-                   tier='task', task='tally_helios_decrypt',
-                   outside_task=True,
-                   note='SELECT + eager LDObjectField deserialization')
+    election.helios_trustee_decrypt()  # contains decryption_factor_time_ns
 
-    with measure.span(election.uuid, 'task_helios_decrypt_ns',
-                      task='tally_helios_decrypt'):
-        election.helios_trustee_decrypt()  # contains decryption_factor_time_ns
-
-    # Outside the span, for the same reason as election_compute_tally: two
-    # serializations performed only to measure payload size. Serialized the way
-    # Helios itself stores them -- LDObjectField.get_prep_value does
-    # LDObject.instantiate(value, datatype=type_hint).serialize(), so a
-    # json.dumps here would report a different size than what is on disk.
+    # Payload sizes, after the crypto so it is not in any span. Serialized the
+    # way Helios stores them (LDObjectField.get_prep_value), so the size
+    # matches what is on disk.
     if measure.enabled():
         from helios import datatypes
         _trustee = election.get_helios_trustee()

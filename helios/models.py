@@ -718,8 +718,7 @@ class Election(HeliosModel):
   def helios_trustee_decrypt(self):
     # NOT timed: LDObjectField defines from_db_value, so the tally was already
     # deserialized during Election.objects.get() in the task. This is an
-    # attribute read. The query's cost is measured there, as
-    # election_load_time_ns.
+    # attribute read.
     tally = self.encrypted_tally
     tally.init_election(self)
 
