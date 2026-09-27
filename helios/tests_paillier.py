@@ -19,7 +19,7 @@ import random as _stdlib_random
 import statistics
 import unittest
 
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, tag
 
 from helios import datatypes, utils
 from helios.crypto import utils as cryptoutils
@@ -167,9 +167,9 @@ class ElGamalGoldenBallotTests(unittest.TestCase):
 TOY_P, TOY_Q = 1019, 1031            # n = 1_050_589
 MEDIUM_P, MEDIUM_Q = 1000003, 1000033  # n ~ 10^12, room for large tallies
 
-# DJN §4.1 needs SAFE primes, and 1024-bit safe primes take a minute or more
-# each to generate, so every DJN test shares this one fixed pair of 512-bit
-# safe primes, giving |n| = 1024. Made once with
+# DJN §4.1 needs SAFE primes, and 1024-bit safe primes take seconds to tens of
+# seconds each to generate, so every DJN test shares this one fixed pair of
+# 512-bit safe primes, giving |n| = 1024. Made once with
 #
 #     Crypto.Math.Primality.generate_probable_safe_prime(exact_bits=512)
 #
@@ -1482,6 +1482,90 @@ class SchemeAgnosticWorkflowTests(unittest.TestCase):
     self.assertEqual((rebuilt[0][0].alpha, rebuilt[0][0].beta), (11, 22))
 
 
+class SafePrimeGeneratorTests(unittest.TestCase):
+  """
+  generate_safe_prime, the sieved search behind DJN §4.1 key generation.
+
+  Its contract: an int p of exactly `bits` bits, at least
+  min_p = isqrt(2^(2*bits - 1)) + 1 -- the sqrt(2) bound -- with p = 2p'+1 and
+  both p and p' prime. Checked at sizes where safe primes are cheap; the full
+  1024-bit size is PaillierKeyGenerationTests' slow test.
+  """
+
+  # Samples per size. Fewer at 512 bits, where one takes a couple of seconds.
+  SAMPLES = {64: 20, 128: 20, 256: 20, 512: 3}
+
+  @classmethod
+  def setUpClass(cls):
+    from helios.crypto import paillier
+    cls.paillier = paillier
+    cls.samples = {bits: [paillier.generate_safe_prime(bits)
+                          for _ in range(count)]
+                   for bits, count in cls.SAMPLES.items()}
+
+  def test_every_sample_meets_the_contract(self):
+    from Crypto.Util import number
+
+    for bits, samples in self.samples.items():
+      min_p = math.isqrt(1 << (2 * bits - 1)) + 1
+      for p in samples:
+        with self.subTest(bits=bits, p=p):
+          self.assertIs(type(p), int)
+          self.assertEqual(p.bit_length(), bits)
+          self.assertGreaterEqual(p, min_p)
+          self.assertEqual(p % 4, 3)
+          self.assertTrue(number.isPrime(p))
+          self.assertTrue(number.isPrime((p - 1) // 2), 'not a safe prime')
+
+  def test_two_samples_meet_the_djn41_conditions(self):
+    for bits, samples in self.samples.items():
+      with self.subTest(bits=bits):
+        p, q = samples[0], next(s for s in samples if s != samples[0])
+        self.paillier.check_djn41_primes(p, q)   # must not raise
+
+  def test_every_product_has_exactly_twice_the_bits(self):
+    """
+    The 2047-bit regression: without the sqrt(2) bound, the product of two
+    bits-bit safe primes is one bit short ~39% of the time (2 ln 2 - 1), and
+    the full-size key generation test once drew a 2047-bit n that way.
+    """
+    samples = self.samples[256]
+    pairs = [(p, q) for i, p in enumerate(samples) for q in samples[i + 1:]]
+    self.assertGreaterEqual(len(pairs), 50)
+
+    for p, q in pairs:
+      self.assertEqual((p * q).bit_length(), 512)
+
+  def test_calls_return_different_primes(self):
+    self.assertNotEqual(self.paillier.generate_safe_prime(128),
+                        self.paillier.generate_safe_prime(128))
+    for bits, samples in self.samples.items():
+      self.assertEqual(len(set(samples)), len(samples), f'repeats at {bits}')
+
+  def test_the_sieve(self):
+    """
+    The product M holds exactly the odd primes up to the bound: odd, divisible
+    by every one of them, and they are all the odd primes there are.
+    """
+    from Crypto.Util import number
+
+    P = self.paillier
+    self.assertEqual(P._SIEVE_PRODUCT % 2, 1)
+    for q in P._SIEVE_PRIMES:
+      self.assertEqual(P._SIEVE_PRODUCT % q, 0, q)
+    self.assertEqual(
+      list(P._SIEVE_PRIMES),
+      [c for c in range(3, P._SIEVE_BOUND + 1, 2) if number.isPrime(c)])
+
+  def test_a_size_below_the_sieve_is_refused(self):
+    """
+    Every safe prime at such a size would have p' among the sieve primes and
+    be rejected, so the search would never end. It refuses instead.
+    """
+    with self.assertRaises(ValueError):
+      self.paillier.generate_safe_prime(8)
+
+
 class DJN41KeyTests(unittest.TestCase):
   """
   DJN §4.1 at the level of the key: what §4.1 asks of p and q, how a key records
@@ -1505,30 +1589,6 @@ class DJN41KeyTests(unittest.TestCase):
     self.assertEqual(math.gcd(DJN_P - 1, DJN_Q - 1), 2)
 
     self.paillier.check_djn41_primes(DJN_P, DJN_Q)   # must not raise
-
-  def test_generated_safe_primes_always_give_a_full_width_modulus(self):
-    """
-    generate_safe_prime keeps every prime above sqrt(2) * 2^(bits-1), as
-    getStrongPrime does for standard keys. Without that bound, the product of
-    two bits-bit safe primes is one bit short ~39% of the time -- which is how
-    the full-size key generation test once drew a 2047-bit n. Checked here at
-    256 bits, where safe primes are cheap.
-    """
-    from Crypto.Util import number
-
-    bits = 256
-    bound = math.isqrt(1 << (2 * bits - 1))    # floor(sqrt(2) * 2^(bits-1))
-    primes = [self.paillier.generate_safe_prime(bits) for _ in range(4)]
-
-    for p in primes:
-      self.assertEqual(p.bit_length(), bits)
-      self.assertGreater(p, bound)
-      self.assertTrue(number.isPrime(p))
-      self.assertTrue(number.isPrime((p - 1) // 2), 'not a safe prime')
-
-    for i, p in enumerate(primes):
-      for q in primes[i + 1:]:
-        self.assertEqual((p * q).bit_length(), 2 * bits)
 
   def test_from_primes_refuses_primes_that_are_not_safe(self):
     """
@@ -2135,13 +2195,15 @@ class PaillierKeyGenerationTests(unittest.TestCase):
     c = kp.pk.encrypt(paillier.PaillierPlaintext(12345, kp.pk))
     self.assertEqual(kp.sk.decryption_factor(c), 12345)
 
+  @tag('slow')
   def test_djn41_keygen_produces_a_valid_2048_bit_key_on_safe_primes(self):
     """
     The one full-size DJN §4.1 key generation in the suite, and deliberately
-    slow: two 1024-bit safe primes take a minute or more each with
-    pycryptodome's generator. Every other DJN test uses the fixed 512-bit safe
-    primes instead. 'short' and 'long' keys are generated identically, so one
-    key serves both.
+    slow: two 1024-bit safe primes, at a median of 12 s each with
+    generate_safe_prime and a tail into tens of seconds. Tagged 'slow', so
+    `--exclude-tag slow` skips it. Every other DJN test uses the fixed
+    512-bit safe primes instead. 'short' and 'long' keys are generated
+    identically, so one key serves both.
     """
     from Crypto.Util import number
     from helios.crypto import paillier

@@ -7,9 +7,9 @@ ciphertext, and what it costs up front.
 At a real 2048-bit key per mode, it prints medians (with the range) of:
 
   - key generation, 5 runs per mode. 'off' draws two 1024-bit strong primes.
-    'short' and 'long' draw two 1024-bit SAFE primes, which take a minute or
-    more each with pycryptodome's generator, so this part alone runs for about
-    half an hour;
+    'short' and 'long' draw two 1024-bit SAFE primes, at a median of 12 s
+    each with generate_safe_prime and a tail into tens of seconds, so this
+    part runs for several minutes;
   - the one-time build of the fixed-base tables, 30 runs;
   - the ciphertext step for one choice, 30 runs: the blinding factor plus the
     Pi_root witness it implies --

@@ -17,6 +17,7 @@ Helios's existing SHA-1 generator. L(x) = (x-1)/n.
 """
 
 import math
+import secrets
 
 from Crypto.Hash import SHA1
 from Crypto.Math import Primality
@@ -116,27 +117,94 @@ def check_djn41_primes(p, q):
     raise ValueError("DJN §4.1: gcd(p-1, q-1) must be 2")
 
 
+def _odd_primes_up_to(bound):
+  """The odd primes <= bound, by the sieve of Eratosthenes."""
+  sieve = bytearray([1]) * (bound + 1)
+  sieve[0:2] = b'\x00\x00'
+  for i in range(2, math.isqrt(bound) + 1):
+    if sieve[i]:
+      sieve[i * i::i] = bytes(len(range(i * i, bound + 1, i)))
+  return tuple(i for i in range(3, bound + 1, 2) if sieve[i])
+
+
+# The joint cheap rejection in generate_safe_prime: a candidate whose p' or
+# 2p'+1 shares a factor with this product is discarded before any modular
+# exponentiation. Built once, at import. The bound is a trade-off -- a larger
+# product rejects more candidates but makes every gcd dearer -- and is chosen
+# by measurement: helios/benchmarks/safe_prime_bench.py.
+_SIEVE_BOUND = 1 << 12
+_SIEVE_PRIMES = _odd_primes_up_to(_SIEVE_BOUND)
+_SIEVE_PRODUCT = math.prod(_SIEVE_PRIMES)
+
+
 def generate_safe_prime(bits):
   """
   A probable safe prime p = 2p'+1 of exactly `bits` bits, above
   sqrt(2) * 2^(bits-1).
 
-  pycryptodome's generate_probable_safe_prime plus that lower bound, which is
-  the one getStrongPrime applies to standard keys. Without it the product of
-  two `bits`-bit primes is a bit short about 39% of the time (2 ln 2 - 1), and
-  a 2047-bit n both fails validate_pk_params and breaks the comparison at
-  |n| = 2048. The bound is checked on p' before its primality test, so it
-  costs nothing measurable.
+  THE BOUND is the one getStrongPrime applies to standard keys: two primes
+  above it multiply to exactly 2*bits bits. Without it the product is a bit
+  short about 39% of the time (2 ln 2 - 1), and a 2047-bit n both fails
+  validate_pk_params and breaks the comparison at |n| = 2048.
+
+  THE SEARCH. Every attempt is a fresh, independent candidate from the
+  operating system's CSPRNG (secrets), never a step from the last one:
+
+    1. Draw p' = 6k + 5 uniformly, over the k that put p = 2p'+1 in
+       [min_p, 2^bits). That loses no safe prime: for p' > 3, p' = 1 (mod 3)
+       would make 3 divide 2p'+1, so every safe prime above 7 has
+       p' = 5 (mod 6).
+    2. Reject unless gcd(p' * p, M) = 1, where M is the product of the odd
+       primes up to _SIEVE_BOUND. One gcd discards every candidate in which
+       either number has a small factor, before any modular exponentiation.
+    3. Reject unless 2^(p-1) = 1 (mod p): a base-2 Fermat test on p.
+    4. Accept only if pycryptodome's full test_probable_prime passes on p',
+       then on p.
+
+  The generator this replaced produced a complete probable prime p' on every
+  attempt and only then tested 2p'+1, so nearly all of its work went into
+  primes it threw away.
+
+  UNIFORM OUTPUT. Each attempt draws uniformly and independently, and whether
+  it is accepted depends on the candidate alone, so the output is a uniform
+  draw from the accepted candidates -- which are exactly the safe primes in
+  range, up to the negligible false-positive rate of the probabilistic tests.
+  No safe prime in range is ever rejected: p' and p exceed the sieve bound,
+  and neither the Fermat test nor test_probable_prime rejects a prime. An
+  incremental search, stepping from a random start, would instead favour the
+  primes that follow long gaps.
+
+  COST, Python on the development machine
+  (helios/benchmarks/safe_prime_bench.py, .cache/safe_prime_bench.log): a
+  median of 12 s per 1024-bit prime over 10 runs (0.3-43 s; the time is a run
+  of independent tries, so the spread is intrinsic). At 512 bits, a median of
+  0.37 s against 13.7 s for the generator it replaced.
   """
+  return _generate_safe_prime(bits, _SIEVE_BOUND, _SIEVE_PRODUCT)
+
+
+def _generate_safe_prime(bits, sieve_bound, sieve_product):
+  """generate_safe_prime, with the sieve as a parameter so it can be tuned."""
   min_p = math.isqrt(1 << (2 * bits - 1)) + 1     # > sqrt(2) * 2^(bits-1)
 
-  # pycryptodome Integers multiply by an int on the left only
+  # p' = 6k + 5, so p = 2p' + 1 = 12k + 11, and p in [min_p, 2^bits).
+  k_lo = -(-(min_p - 11) // 12)
+  k_hi = ((1 << bits) - 12) // 12
+  if k_hi < k_lo or 6 * k_lo + 5 <= sieve_bound:
+    raise ValueError("%d bits is too small for a safe prime above the sieve "
+                     "bound %d" % (bits, sieve_bound))
+
   while True:
-    p_prime = Primality.generate_probable_prime(
-      exact_bits=bits - 1, prime_filter=lambda c: c * 2 + 1 >= min_p)
-    p = p_prime * 2 + 1
-    if Primality.test_probable_prime(p) == Primality.PROBABLY_PRIME:
-      return int(p)
+    p_prime = 6 * (k_lo + secrets.randbelow(k_hi - k_lo + 1)) + 5
+    p = 2 * p_prime + 1
+
+    if math.gcd(p_prime * p, sieve_product) != 1:
+      continue
+    if pow(2, p - 1, p) != 1:
+      continue
+    if (Primality.test_probable_prime(p_prime) == Primality.PROBABLY_PRIME
+        and Primality.test_probable_prime(p) == Primality.PROBABLY_PRIME):
+      return p
 
 
 def djn41_fields_from_dict(d):
@@ -387,11 +455,11 @@ class PaillierKeyPair:
     slower than naive prime search would be, and comparably safer.
 
     Under either DJN §4.1 mode the primes are SAFE primes instead, as §4.1
-    requires (see check_djn41_primes), from generate_safe_prime. That draws a
-    fresh (key_size-1)-bit prime p' per attempt and keeps 2p'+1 only if it is
-    prime too, so it is far slower than getStrongPrime: at 1024 bits, a minute
-    or more per prime on the development machine. That, not h, dominates DJN
-    key generation time.
+    requires (see check_djn41_primes), from generate_safe_prime's sieved
+    search. Safe primes are rare, so this is still far slower than
+    getStrongPrime: at 1024 bits, a median of 12 s per prime on the
+    development machine, with a long tail. That, not h, dominates DJN key
+    generation time.
     """
     if djn41_mode == 'off':
       def new_prime():
