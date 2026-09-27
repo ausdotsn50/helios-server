@@ -148,8 +148,15 @@ def tally_helios_decrypt(election_id):
     if measure.enabled():
         from helios import datatypes
         _trustee = election.get_helios_trustee()
-        _f_type = datatypes.arrayOf(datatypes.arrayOf('core/BigInteger'))
-        _p_type = datatypes.arrayOf(datatypes.arrayOf('legacy/EGZKProof'))
+        # The type hints come from the Trustee fields themselves, because
+        # LDObjectField.get_prep_value serializes with exactly those: the
+        # measured size is then the stored size by construction, for any
+        # scheme. A copied literal would only match by coincidence -- the
+        # proofs hint 'legacy/EGZKProof' is scheme-ambiguous, and Paillier
+        # proofs serialize as paillier/ZKProof only because datatypes honours
+        # the object's own datatype for such hints.
+        _f_type = _trustee._meta.get_field('decryption_factors').type_hint
+        _p_type = _trustee._meta.get_field('decryption_proofs').type_hint
         _n_cells = sum(len(q) for q in election.encrypted_tally.tally)
         measure.record(
             election.uuid, 'decryption_factors_bytes',
