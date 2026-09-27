@@ -539,6 +539,12 @@ class PaillierPublicKey:
   # See helios/datatypes/__init__.py.
   datatype = 'paillier/PublicKey'
 
+  # Does decryption pass through a discrete-log table? No: single-trustee
+  # Paillier decryption yields the plaintext itself (see tally_decoder). Read
+  # by Tally.decrypt_from_factors to decide what it times; the same meaning as
+  # has_dlog in the workload harness's schemes.py.
+  has_dlog = False
+
   def __init__(self, n=None, g=None, h=None, hn=None, djn41_mode='off'):
     self.n = n
     self.g = g

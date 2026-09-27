@@ -7,6 +7,8 @@ reworked 2011-01-09
 """
 
 import logging
+import time
+from helios import measure
 from . import WorkflowObject
 
 class EncryptedAnswer(WorkflowObject):
@@ -312,32 +314,60 @@ class Tally(WorkflowObject):
 
     self.num_tallied += 1
 
-  def decryption_factors_and_proofs(self, sk):
+  def decryption_factors_and_proofs(self, sk, election_uuid=None):
     """
     returns an array of decryption factors and a corresponding array of decryption proofs.
     makes the decryption factors into strings, for general Helios / JS compatibility.
+
+    election_uuid is measurement-only and defaults to None, which keeps the
+    signature backward-compatible and makes the spans no-ops for any caller
+    that does not pass it.
     """
+    measuring = measure.enabled()
+
+    # Factor-only time, measured on the real pass.
+    factor_only_ns = 0
+    if measuring:
+      def timed_factor(ciphertext, _real=sk.decryption_factor):
+        nonlocal factor_only_ns
+        t0 = time.perf_counter_ns()
+        out = _real(ciphertext)
+        factor_only_ns += time.perf_counter_ns() - t0
+        return out
+      sk.decryption_factor = timed_factor  # this key only
+
     # for all choices of all questions (double list comprehension)
     decryption_factors = []
     decryption_proof = []
-    
-    for question_num, question in enumerate(self.questions):
-      answers = question['answers']
-      question_factors = []
-      question_proof = []
 
-      for answer_num, answer in enumerate(answers):
-        # do decryption and proof of it
-        dec_factor, proof = sk.decryption_factor_and_proof(self.tally[question_num][answer_num])
+    # Factor + Chaum-Pedersen proof, the real call.
+    try:
+      with measure.span(election_uuid, 'decryption_factor_time_ns'):
+        for question_num, question in enumerate(self.questions):
+          answers = question['answers']
+          question_factors = []
+          question_proof = []
 
-        # look up appropriate discrete log
-        # this is the string conversion
-        question_factors.append(dec_factor)
-        question_proof.append(proof)
-        
-      decryption_factors.append(question_factors)
-      decryption_proof.append(question_proof)
-    
+          for answer_num, answer in enumerate(answers):
+            # do decryption and proof of it
+            dec_factor, proof = sk.decryption_factor_and_proof(self.tally[question_num][answer_num])
+
+            # look up appropriate discrete log
+            # this is the string conversion
+            question_factors.append(dec_factor)
+            question_proof.append(proof)
+
+          decryption_factors.append(question_factors)
+          decryption_proof.append(question_proof)
+    finally:
+      if measuring:
+        del sk.decryption_factor  # restore the class method
+
+    if measuring:
+      measure.record(election_uuid, 'decryption_factor_only_ns',
+                     factor_only_ns,
+                     n_cells=sum(len(q) for q in self.tally))
+
     return decryption_factors, decryption_proof
     
   def decrypt_and_prove(self, sk, discrete_logs=None):
@@ -394,35 +424,67 @@ class Tally(WorkflowObject):
     
     return True
     
-  def decrypt_from_factors(self, decryption_factors, public_key):
+  def decrypt_from_factors(self, decryption_factors, public_key,
+                           election_uuid=None):
     """
     decrypt a tally given decryption factors
-    
+
     The decryption factors are a list of decryption factor sets, for each trustee.
     Each decryption factor set is a list of lists of decryption factors (questions/answers).
+
+    election_uuid is measurement-only and defaults to None, which keeps the
+    signature backward-compatible and makes the spans no-ops for any caller
+    that does not pass it.
     """
-    
     # obtain the decoder that turns a decrypted value into a tally.
     # ElGamal: a precomputed dlog table, Theta(N) to build, O(1) to look up.
     # Paillier: the identity -- single-trustee decryption already yields the
     # plaintext, so there is no discrete logarithm to resolve.
-    decoder = public_key.tally_decoder(self.num_tallied)
+    #
+    # Timed per scheme, on the public key's declared has_dlog: the same meaning
+    # as has_dlog in the workload harness's schemes.py.
+    if public_key.has_dlog:
+      # Helios builds the dlog table here, in the web process, synchronously
+      # inside the combine_decryptions request. For ElGamal, tally_decoder IS
+      # that construction and precompute -- Theta(N) by construction.
+      with measure.span(election_uuid, 'dlog_precompute_time_ns',
+                        num_tallied=self.num_tallied):
+        decoder = public_key.tally_decoder(self.num_tallied)
+
+      # Directly measured, not derived: per-cell decrypt() plus the O(1)
+      # table lookups.
+      loop_metric, loop_extra = 'dlog_lookup_time_ns', {}
+    else:
+      # Paillier: tally_decoder returns the identity, so nothing runs here and
+      # nothing is timed or recorded. There is no counterpart of
+      # dlog_precompute_time_ns.
+      decoder = public_key.tally_decoder(self.num_tallied)
+
+      # Paillier's counterpart of dlog_lookup_time_ns: it is the SAME per-cell
+      # loop. The Paillier decryption itself (CRT, per cell) is not in it --
+      # that is inside decryption_factor_only_ns, which the trustee records in
+      # the worker. Here each cell combines its decryption factor and passes it
+      # through the identity decoder.
+      loop_metric, loop_extra = 'decryption_time_ns', {
+        'includes': 'per-cell combine of decryption factors + identity decode'}
 
     result = []
-    
-    # go through each one
-    for q_num, q in enumerate(self.tally):
-      q_result = []
 
-      for a_num, a in enumerate(q):
-        # coalesce the decryption factors into one list
-        dec_factor_list = [df[q_num][a_num] for df in decryption_factors]
-        raw_value = self.tally[q_num][a_num].decrypt(dec_factor_list, public_key)
-        
-        q_result.append(decoder(raw_value))
+    with measure.span(election_uuid, loop_metric,
+                      n_cells=sum(len(q) for q in self.tally), **loop_extra):
+      # go through each one
+      for q_num, q in enumerate(self.tally):
+        q_result = []
 
-      result.append(q_result)
-    
+        for a_num, a in enumerate(q):
+          # coalesce the decryption factors into one list
+          dec_factor_list = [df[q_num][a_num] for df in decryption_factors]
+          raw_value = self.tally[q_num][a_num].decrypt(dec_factor_list, public_key)
+
+          q_result.append(decoder(raw_value))
+
+        result.append(q_result)
+
     return result
 
   def _process_value_in(self, field_name, field_value):

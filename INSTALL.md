@@ -2,9 +2,9 @@
 
 ## Prerequisites
 
-* Install PostgreSQL 12+ - done
+* Install PostgreSQL 12+
 
-* Install RabbitMQ - done
+* Install RabbitMQ
   This is needed for Celery to work, which does background processing such as
   the processing of uploaded list-of-voter CSV files, verification of cast
   votes, and tally computation.
@@ -20,7 +20,7 @@
 deprecated_features.permit.transient_nonexcl_queues = true
 ```
 
-* Download helios-server - done (cloned)
+* Download helios-server
 
 * `cd` into the helios-server directory
 

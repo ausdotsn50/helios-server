@@ -170,6 +170,11 @@ _PROPERTIES = {
 # hardcoding 0.
 _ATTRIBUTES = {
   'randomness_identity': 0,
+  # Decryption passes through a discrete-log table: tally_decoder above builds
+  # it. Read by Tally.decrypt_from_factors to decide what it times; the same
+  # meaning as has_dlog in the workload harness's schemes.py. Paillier's key
+  # declares False.
+  'has_dlog': True,
   # Which datatype a trustee public key of this scheme serializes as. Read by
   # models.generate_trustee, which previously hardcoded 'legacy/EGPublicKey'.
   'public_key_datatype': 'legacy/EGPublicKey',
