@@ -95,16 +95,25 @@ class Election(HeliosModel):
   #
   # Both are ignored entirely by ElGamal elections.
 
-  # DJN §4.1 alternative encryption function: h^r with a short exponent instead
-  # of v^n. Worth ~3.85x on the ciphertext but only ~1.31x on the reported
-  # encryption metric, which is ~68% proof generation. Costs an assumption
-  # beyond decisional composite residuosity, so it is off by default.
-  paillier_use_djn41 = models.BooleanField(default=False, null=False)
+  # DJN §4.1 alternative encryption function, hn^a with a fixed base instead of
+  # v^n (see helios/crypto/paillier.py). 'short' draws a ceil(|n|/2)-bit
+  # exponent and costs an assumption beyond decisional composite residuosity;
+  # 'long' draws the exponent from [0, n/2) and costs none. Both are ablations,
+  # so standard Paillier ('off') is the default.
+  PAILLIER_DJN41_MODES = (
+    ('off', 'Off (standard Paillier)'),
+    ('short', 'DJN §4.1, short exponent'),
+    ('long', 'DJN §4.1, long exponent'),
+    )
+
+  paillier_djn41_mode = models.CharField(max_length=10, null=False,
+                                         default='off',
+                                         choices=PAILLIER_DJN41_MODES)
 
   # CRT acceleration of the DECRYPTION PROOF (decryption itself is always
   # CRT-accelerated). Worth ~1.72x, and available to the trustee by definition
-  # since only the trustee holds the factorization -- so unlike DJN §4.1 it
-  # costs no additional assumption and is ON by default. Switchable so the
+  # since only the trustee holds the factorization -- so unlike 'short' DJN §4.1
+  # it costs no additional assumption and is ON by default. Switchable so the
   # ablation can measure what it is worth rather than assert it.
   paillier_use_crt_proofs = models.BooleanField(default=True, null=False)
 
@@ -121,7 +130,7 @@ class Election(HeliosModel):
       return {}
 
     return {
-      'paillier_use_djn41': self.paillier_use_djn41,
+      'paillier_djn41_mode': self.paillier_djn41_mode,
       'paillier_use_crt_proofs': self.paillier_use_crt_proofs,
     }
 

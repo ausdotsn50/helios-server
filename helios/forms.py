@@ -32,10 +32,11 @@ class ElectionForm(forms.Form):
   # Optimization ablations (masterplan §6.3). Per-election so the workload can
   # vary them cell by cell without restarting anything, and so a stored
   # election records what it actually ran under.
-  paillier_use_djn41 = forms.BooleanField(
-    required=False, initial=False, label="Paillier: DJN §4.1 encryption",
-    help_text='Short-exponent encryption. Faster ciphertexts, but assumes more '
-              'than decisional composite residuosity.')
+  paillier_djn41_mode = forms.ChoiceField(
+    required=False, initial='off', label="Paillier: DJN §4.1 encryption",
+    choices=Election.PAILLIER_DJN41_MODES,
+    help_text='Fixed-base encryption. "short" is fastest but assumes more than '
+              'decisional composite residuosity; "long" assumes nothing extra.')
 
   paillier_use_crt_proofs = forms.BooleanField(
     required=False, initial=True, label="Paillier: CRT decryption proofs",
@@ -45,6 +46,25 @@ class ElectionForm(forms.Form):
   def clean_crypto_scheme(self):
     # An empty submission means "unchanged", not "invalid".
     return self.cleaned_data.get('crypto_scheme') or 'elgamal'
+
+  def clean_paillier_djn41_mode(self):
+    # Absent or empty means 'off', the standard encryption function. Any value
+    # outside the three choices is already a validation error, so a stray "1"
+    # or "true" is refused rather than read as a mode.
+    return self.cleaned_data.get('paillier_djn41_mode') or 'off'
+
+  def clean(self):
+    cleaned_data = super().clean()
+
+    # The boolean this setting replaced. A caller still posting it would get
+    # 'off' without a word, and an ablation cell would record a mode it never
+    # ran -- so it is refused by name.
+    if 'paillier_use_djn41' in self.data:
+      raise forms.ValidationError(
+        'paillier_use_djn41 has been replaced by paillier_djn41_mode '
+        '("off", "short" or "long").')
+
+    return cleaned_data
 
   # --- ablation flags: parsed from the RAW post, not via CheckboxInput -----
   #
@@ -58,8 +78,10 @@ class ElectionForm(forms.Form):
   # created with djn41=True. The acceptance cross-check caught it, which is the
   # argument for having built that check.
   #
-  # These read self.data directly so that "0", "false", "" and absence all mean
-  # what a caller would expect, independent of widget behaviour.
+  # The CRT flag therefore reads self.data directly, so that "0", "false", ""
+  # and absence all mean what a caller would expect, independent of widget
+  # behaviour. (The §4.1 setting has since become a three-way choice, which a
+  # ChoiceField validates as one; see clean_paillier_djn41_mode.)
 
   FALSEY = ('', '0', 'false', 'False', 'off', 'no')
 
@@ -67,10 +89,6 @@ class ElectionForm(forms.Form):
     if name not in self.data:
       return default
     return self.data.get(name) not in self.FALSEY
-
-  def clean_paillier_use_djn41(self):
-    """Off unless explicitly requested — it widens the security assumption."""
-    return self._raw_flag('paillier_use_djn41', False)
 
   def clean_paillier_use_crt_proofs(self):
     """

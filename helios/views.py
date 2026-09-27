@@ -60,9 +60,10 @@ ELGAMAL_PARAMS_LD_OBJECT = datatypes.LDObject.instantiate(ELGAMAL_PARAMS, dataty
 PAILLIER_PARAMS = paillier.Paillier()
 PAILLIER_PARAMS.key_size = 1024
 
-# Whether a given election's keys carry the DJN §4.1 short-exponent parameters
-# is decided PER ELECTION by Election.paillier_use_djn41, not here -- see
-# crypto_params_for below. Only the key size is deployment-wide.
+# Which encryption function a given election's keys use -- standard, or one of
+# the two DJN §4.1 modes -- is decided PER ELECTION by
+# Election.paillier_djn41_mode, not here; see crypto_params_for below. Only the
+# key size is deployment-wide.
 
 
 CRYPTO_PARAMS = {
@@ -86,7 +87,7 @@ def crypto_params_for(election):
   if scheme == 'paillier':
     return paillier.Paillier(
       key_size=PAILLIER_PARAMS.key_size,
-      use_djn_41=getattr(election, 'paillier_use_djn41', False))
+      djn41_mode=getattr(election, 'paillier_djn41_mode', 'off'))
 
   try:
     return CRYPTO_PARAMS[scheme]
@@ -1249,7 +1250,7 @@ def one_election_copy(request, election):
     # without this a copied Paillier election would silently become ElGamal,
     # or would quietly change optimization level
     crypto_scheme = election.crypto_scheme,
-    paillier_use_djn41 = election.paillier_use_djn41,
+    paillier_djn41_mode = election.paillier_djn41_mode,
     paillier_use_crt_proofs = election.paillier_use_crt_proofs,
     short_name = new_short_name,
     name = "Copy of " + election.name,

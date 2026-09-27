@@ -45,19 +45,22 @@ class PaillierObject(LDObject):
 
 class PublicKey(PaillierObject):
     """
-    A Paillier public key: {n, g}, plus {h, g_prime} under DJN §4.1.
+    A Paillier public key: {n, g}, plus {h, hn, djn41_mode} under DJN §4.1.
 
-    The §4.1 parameters are emitted ONLY when the key carries them, rather than
+    The §4.1 fields are emitted ONLY when the key is in a DJN mode, rather than
     being declared in FIELDS and serialized as nulls on a standard key. Two
-    reasons, and the second is the load-bearing one:
+    reasons:
 
     1. A standard key's serialization is then byte-for-byte what it was before
        §4.1 existed, so stored elections and the B8 ballot-size canary are
        unaffected.
-    2. Presence IS the discriminator. PaillierPublicKey.uses_djn_41 tests for
-       `h`, so a key that round-trips through the database comes back in the
-       same mode it went in, with no separate boolean to drift out of sync with
-       the values it describes.
+    2. The mode travels with the key. The booth sees only the public key, and
+       a 'short' key and a 'long' key differ in nothing else, so a key that
+       round-trips through the database comes back in the mode it went in.
+
+    Both shapes reach this class from the 'legacy/EGPublicKey' hint too: the
+    shape dispatch in helios/datatypes/__init__.py keys on 'y' being absent and
+    'n' present, which holds for either.
     """
     WRAPPED_OBJ_CLASS = crypto_paillier.PaillierPublicKey
     FIELDS = ['n', 'g']
@@ -65,16 +68,16 @@ class PublicKey(PaillierObject):
         'n': 'core/BigInteger',
         'g': 'core/BigInteger'}
 
-    # Serialized alongside FIELDS when present. Not in FIELDS itself, because
+    # Serialized alongside FIELDS on a DJN key. Not in FIELDS itself, because
     # LDObject.loadDataFromDict indexes d[f] unconditionally and would raise
     # KeyError on every standard key.
-    DJN41_FIELDS = ['h', 'g_prime']
+    DJN41_FIELDS = ['h', 'hn', 'djn41_mode']
 
     def toDict(self, complete=False):
         d = super(PublicKey, self).toDict(complete=complete)
 
         pk = self.wrapped_obj
-        if getattr(pk, 'h', None) is not None:
+        if pk.uses_djn_41:
             for f in self.DJN41_FIELDS:
                 d[f] = str(getattr(pk, f))
 
@@ -83,9 +86,10 @@ class PublicKey(PaillierObject):
     def loadDataFromDict(self, d):
         super(PublicKey, self).loadDataFromDict(d)
 
-        for f in self.DJN41_FIELDS:
-            value = d.get(f)
-            setattr(self.wrapped_obj, f, int(value) if value else None)
+        # Parsed by the same function as PaillierPublicKey.from_dict, which
+        # also refuses the retired (h, g_prime) format.
+        for f, value in crypto_paillier.djn41_fields_from_dict(d).items():
+            setattr(self.wrapped_obj, f, value)
 
 
 class SecretKey(PaillierObject):

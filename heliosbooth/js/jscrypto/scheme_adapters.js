@@ -97,8 +97,9 @@ if (typeof Paillier !== 'undefined' && Paillier.PublicKey) {
  *
  * Dispatches on the serialized field set, matching helios/datatypes/__init__.py
  * on the server: an ElGamal public key carries y, p, g, q; a Paillier public
- * key carries n and g. The discriminators are disjoint by construction rather
- * than by convention, so a key cannot be misread as the wrong scheme.
+ * key carries n and g, plus h, hn and djn41_mode under DJN 4.1. The
+ * discriminators are disjoint by construction rather than by convention, so a
+ * key cannot be misread as the wrong scheme.
  */
 CRYPTO.publicKeyFromJSONObject = function(d) {
   if (d == null)

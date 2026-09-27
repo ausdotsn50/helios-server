@@ -19,7 +19,7 @@ import random as _stdlib_random
 import statistics
 import unittest
 
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 
 from helios import datatypes, utils
 from helios.crypto import utils as cryptoutils
@@ -167,6 +167,18 @@ class ElGamalGoldenBallotTests(unittest.TestCase):
 TOY_P, TOY_Q = 1019, 1031            # n = 1_050_589
 MEDIUM_P, MEDIUM_Q = 1000003, 1000033  # n ~ 10^12, room for large tallies
 
+# DJN §4.1 needs SAFE primes, and 1024-bit safe primes take a minute or more
+# each to generate, so every DJN test shares this one fixed pair of 512-bit
+# safe primes, giving |n| = 1024. Made once with
+#
+#     Crypto.Math.Primality.generate_probable_safe_prime(exact_bits=512)
+#
+# redrawn until p*q had exactly 1024 bits, then checked: p = q = 3 (mod 4),
+# gcd(p-1, q-1) = 2, and p, q, (p-1)/2 and (q-1)/2 all prime.
+# DJN41KeyTests.test_the_fixed_primes_meet_the_djn41_conditions re-checks them.
+DJN_P = 13168689723100660585685922549334792506527228763451163683969222265825863724246852232201259732581751830544365565680414276277884873986403685288800169781242727
+DJN_Q = 8645116233607178444096843766139414926699103144057498079660518867117481230248921238509961864803698923112142027274849449064395322551689148313525971278196299
+
 
 def toy_keypair():
   from helios.crypto.paillier import PaillierKeyPair
@@ -176,6 +188,48 @@ def toy_keypair():
 def medium_keypair():
   from helios.crypto.paillier import PaillierKeyPair
   return PaillierKeyPair.from_primes(MEDIUM_P, MEDIUM_Q)
+
+
+def djn_keypair(mode):
+  """A key on the fixed safe primes, in any of the three modes."""
+  from helios.crypto.paillier import PaillierKeyPair
+  return PaillierKeyPair.from_primes(DJN_P, DJN_Q, djn41_mode=mode)
+
+
+@contextlib.contextmanager
+def _validation_floor(bits):
+  """
+  Lower validate_pk_params's minimum modulus width for the duration. A 1024-bit
+  test key would otherwise be refused for its length before any DJN §4.1 check
+  ran, and a test of those checks would pass without reaching them.
+  """
+  from unittest import mock
+  from helios.crypto import paillier
+
+  with mock.patch.object(paillier, 'MIN_MODULUS_BITS', bits):
+    yield
+
+
+def _run_node_bridge(test, script, payload, *args):
+  """Run helios/js_bridge/<script> on a JSON payload; return its verdict."""
+  import subprocess
+  import tempfile
+
+  script_path = os.path.join(os.path.dirname(__file__), 'js_bridge', script)
+  with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
+    json.dump(payload, f)
+    path = f.name
+
+  try:
+    proc = subprocess.run(['node', script_path, path, *args],
+                          capture_output=True, text=True, timeout=600)
+    try:
+      return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+      test.fail(f'js bridge {script} produced no verdict\n'
+                f'stderr: {proc.stderr[-2000:]}')
+  finally:
+    os.unlink(path)
 
 
 class PaillierCoreTests(unittest.TestCase):
@@ -366,8 +420,9 @@ class PaillierCoreTests(unittest.TestCase):
 
     The closed form h_p = (-q)^-1 mod p follows because
     (1+pq)^(p-1) = 1 + (p-1)pq (mod p^2) -- every higher binomial term carries
-    (pq)^2, which vanishes mod p^2. DJN gives one sentence about CRT and no
-    algorithm, so this step is derived rather than quoted, and worth checking.
+    (pq)^2, which vanishes mod p^2. Paillier (1999) §7 gives h_p only in its
+    general form, L_p(g^(p-1) mod p^2)^-1, so the closed form is derived rather
+    than quoted, and worth checking.
     """
     from Crypto.Util import number
 
@@ -530,6 +585,159 @@ def _two_sample_ks(a, b):
 
   d_crit = 1.628 * math.sqrt((n + m) / (n * m))
   return d, d_crit
+
+
+def _forge_oversized_challenge_proof(ciphertext, plaintexts, true_m, witness,
+                                     challenge_generator):
+  """
+  A disjunctive proof that `ciphertext` encrypts one of `plaintexts`, for a
+  ciphertext that encrypts none of them -- it encrypts `true_m`.
+
+  Every branch j is false: u_j = (1 + d_j*n) * v^n with d_j = true_m - m_j != 0.
+  A false branch still satisfies z^n = a * u^e (mod n^2) for EVERY e congruent
+  to e_j* mod n, because the (1 + t_j*n) planted in the commitment cancels the
+  (1 + e*d_j*n) that u_j^e carries:
+
+      a_j = s_j^n * (1 + t_j*n) mod n^2,   e_j* = -t_j * d_j^-1 mod n,
+      z_j = s_j * v^e_j mod n
+
+  The challenges still have to sum to the hash mod 2^160. n is odd, hence
+  invertible mod 2^160, so adding k*n to one challenge, with
+  k = (H - sum e_j*) * n^-1 mod 2^160, hits the hash exactly without moving any
+  challenge's residue mod n.
+
+  With t_j drawn at random, every e_j* is a full-width residue mod n. Here
+  every branch but the last instead fixes an in-range challenge e_j first and
+  sets t_j = -e_j * d_j mod n, so that e_j* = e_j. The forged proof then has
+  exactly ONE bad challenge, the last, at about |n| + 160 bits: a single
+  oversized challenge is enough, and the range check has to hold for each
+  challenge, not for the set.
+
+  `witness` is v, the n-th root of the ciphertext's blinding factor.
+  """
+  from helios.crypto import paillier as P
+
+  pk = ciphertext.pk
+  n, n2 = pk.n, pk.n2
+  L = len(plaintexts)
+
+  d = []
+  for j, plaintext in enumerate(plaintexts):
+    d.append((true_m - plaintext.m) % n)
+    if d[j] == 0:
+      raise ValueError('branch %d is true; this recipe forges false branches' % j)
+
+  s = [P.random_z_star_n(n) for _ in range(L)]
+  e = [P.random_lt(P.CHALLENGE_MODULUS) for _ in range(L - 1)]
+  t = [(-e[j] * d[j]) % n for j in range(L - 1)] + [P.random_lt(n)]
+  a = [(pow(s[j], n, n2) * (1 + t[j] * n)) % n2 for j in range(L)]
+  H = challenge_generator(a)
+
+  e_last = (-t[-1] * pow(d[-1], -1, n)) % n
+  k = ((H - sum(e) - e_last) * pow(n, -1, P.CHALLENGE_MODULUS)) \
+      % P.CHALLENGE_MODULUS
+  e.append(e_last + k * n)
+
+  z = [(s[j] * pow(witness, e[j], n)) % n for j in range(L)]
+  return P.PaillierZKDisjunctiveProof(
+    [P.PaillierZKProof(a[j], e[j], z[j]) for j in range(L)])
+
+
+def _audit_disjunctive_proof(ciphertext, plaintexts, proof, challenge_generator):
+  """
+  Each check the disjunctive verifier makes, evaluated separately.
+
+  A test that feeds the verifier a bad proof proves something only if the proof
+  is bad in exactly ONE way: a forgery that also broke a second check would be
+  rejected whether or not the check under test exists, and the test would pass
+  vacuously. The tests below use this to pin down which check does the work.
+  """
+  from helios.crypto.paillier import CHALLENGE_MODULUS
+
+  pk = ciphertext.pk
+  n, n2 = pk.n, pk.n2
+
+  equations, units = [], []
+  for plaintext, p in zip(plaintexts, proof.proofs):
+    u = ciphertext._statement_for(plaintext)
+    equations.append(pow(p.response, n, n2)
+                     == (p.commitment * pow(u, p.challenge, n2)) % n2)
+    units.append(all(math.gcd(x, n) == 1 for x in (p.response, u, p.commitment)))
+
+  commitments = [p.commitment for p in proof.proofs]
+  return {
+    'branch_count': len(plaintexts) == len(proof.proofs),
+    'equations': all(equations),
+    'units': all(units),
+    'sum_matches_hash': (challenge_generator(commitments)
+                         == sum(p.challenge for p in proof.proofs)
+                         % CHALLENGE_MODULUS),
+    'challenges_in_range': all(0 <= p.challenge < CHALLENGE_MODULUS
+                               for p in proof.proofs),
+  }
+
+
+# What _audit_disjunctive_proof reports for a proof bad in exactly one way.
+_FAILS_ONLY_THE_RANGE_CHECK = {
+  'branch_count': True, 'equations': True, 'units': True,
+  'sum_matches_hash': True, 'challenges_in_range': False}
+_FAILS_ONLY_THE_UNIT_CHECK = {
+  'branch_count': True, 'equations': True, 'units': False,
+  'sum_matches_hash': True, 'challenges_in_range': True}
+
+
+# The ishaq canary under DJN §4.1 (the per-mode Python canary, and the JS
+# canary tests 11 and 11d): proofs per run, and the band the above-n/2 count
+# of each group must fall in. Half of all honest responses lie above n/2, so an
+# honest group of 32 leaves [4, 28] with probability ~1e-5.
+CANARY_TRIALS = 32
+CANARY_MIN_ABOVE_HALF = 4
+
+
+def _canary_verdict(real, simulated, n):
+  """The measurements check_response_distribution.js reports, in Python."""
+  real_bits = [z.bit_length() for z in real]
+  simulated_bits = [z.bit_length() for z in simulated]
+  return {
+    'trials': len(real),
+    'real_bits': real_bits,
+    'simulated_bits': simulated_bits,
+    'delta_bits': abs(statistics.mean(real_bits)
+                      - statistics.mean(simulated_bits)),
+    'real_above_half': sum(1 for z in real if z > n // 2),
+    'simulated_above_half': sum(1 for z in simulated if z > n // 2),
+  }
+
+
+def _canary_alarms(verdict):
+  """
+  Every criterion of the ishaq canary that `verdict` trips. Empty means the
+  real and simulated responses are indistinguishable by all it measures.
+
+  - Mean bit lengths within 5 bits (see test 11's JS variant for why 5), and
+    bit-length distributions that pass a two-sample KS test at 1%. These catch
+    a response drawn from a short range, and ishaq's mod-n^2 reduction.
+  - In each group, between CANARY_MIN_ABOVE_HALF and trials minus that many
+    responses above n/2. A response drawn from a 'long' exponent range,
+    [0, n/2), never gets there, yet is only one bit shorter than an honest
+    one -- within noise of both bit-length criteria. Test 11d shows this is
+    the criterion that catches it.
+  """
+  alarms = []
+  if verdict['delta_bits'] >= 5.0:
+    alarms.append('mean bit lengths differ by %.1f bits' % verdict['delta_bits'])
+
+  d, d_crit = _two_sample_ks(verdict['real_bits'], verdict['simulated_bits'])
+  if d >= d_crit:
+    alarms.append('bit-length KS statistic %.3f >= %.3f' % (d, d_crit))
+
+  trials = verdict['trials']
+  for group in ('real', 'simulated'):
+    above = verdict[group + '_above_half']
+    if not CANARY_MIN_ABOVE_HALF <= above <= trials - CANARY_MIN_ABOVE_HALF:
+      alarms.append('%d of %d %s responses above n/2' % (above, trials, group))
+
+  return alarms
 
 
 class PaillierProofTests(unittest.TestCase):
@@ -889,6 +1097,131 @@ class PaillierProofTests(unittest.TestCase):
       'an all-simulated proof verified — the challenge-sum check is not '
       'binding, and ballot validity means nothing')
 
+  def test_12f_oversized_challenge_forgery_is_rejected(self):
+    """
+    DJN §5.2 makes every branch challenge "a random t bit number". A verifier
+    that checks only that the challenges SUM to the hash mod 2^160 accepts one
+    challenge of about |n| + 160 bits, and that is enough to prove a ciphertext
+    encrypts a plaintext it does not -- see _forge_oversized_challenge_proof.
+    Before the range check existed, this verified Enc(2), Enc(-5) and a
+    13-selection sum on a max-12 question at 2048 bits.
+
+    The key is 1024 bits rather than the class's medium key so that
+    2^160 < min(p, q). That is the regime in which Pi_root is sound at all, so
+    a forgery here is a real soundness break rather than a toy-size artifact.
+    """
+    P = self.paillier
+    kp = P.Paillier(key_size=512).generate_keypair()
+    pk = kp.pk
+
+    def enc_2():
+      c, r = pk.encrypt_return_r(P.PaillierPlaintext(2, pk))
+      return c, r, 2, pk.generate_plaintexts(0, 1)
+
+    def thirteen_selections():
+      # the homomorphic sum a ballot selecting 13 of 20 candidates produces
+      C, R = 0, pk.randomness_identity
+      for i in range(20):
+        c, r = pk.encrypt_return_r(P.PaillierPlaintext(1 if i < 13 else 0, pk))
+        C = c * C
+        R = pk.combine_randomness(R, r)
+      return C, R, 13, pk.generate_plaintexts(0, 12)
+
+    for label, build in (('Enc(2) over {0, 1}', enc_2),
+                         ('Enc(13) over 0..12', thirteen_selections)):
+      with self.subTest(label):
+        c, randomness, true_m, plaintexts = build()
+        self.assertEqual(kp.sk.decryption_factor(c), true_m)
+        witness = pk.proof_witness(randomness)
+
+        oversized = _forge_oversized_challenge_proof(
+          c, plaintexts, true_m, witness, self.gen)
+
+        # The same forgery with the big challenge pushed below zero: its
+        # residues mod n and mod 2^160 are unchanged, so it forges just as
+        # well. This guards the lower half of the range check.
+        negative = P.PaillierZKDisjunctiveProof(
+          [P.PaillierZKProof(p.commitment, p.challenge, p.response)
+           for p in oversized.proofs])
+        last, shift = negative.proofs[-1], pk.n * P.CHALLENGE_MODULUS
+        last.challenge -= shift
+        last.response = (last.response * pow(witness, -shift, pk.n)) % pk.n
+        self.assertLess(last.challenge, 0)
+
+        for variant, proof in (('oversized', oversized), ('negative', negative)):
+          # The forgery must be real -- it passes every check except the
+          # range check -- or this test would pass whatever the verifier did.
+          self.assertEqual(
+            _audit_disjunctive_proof(c, plaintexts, proof, self.gen),
+            _FAILS_ONLY_THE_RANGE_CHECK,
+            f'{label}, {variant}: not a forgery that isolates the range check')
+
+          # ...and only the last challenge is out of range, so each variant
+          # tests one bound of the check alone.
+          self.assertEqual(
+            [0 <= p.challenge < P.CHALLENGE_MODULUS for p in proof.proofs],
+            [True] * (len(plaintexts) - 1) + [False])
+
+          self.assertFalse(
+            c.verify_disjunctive_encryption_proof(plaintexts, proof, self.gen),
+            f'{label}, {variant} challenge: a forged proof verified, so the '
+            f'verifier is not checking that each challenge is in [0, 2^160)')
+
+  def test_12g_values_sharing_a_factor_with_n_are_rejected(self):
+    """
+    DJN §5.2 requires "u, a, z are prime to n". PaillierZKProof.verify checks
+    it, but until this test nothing exercised the check, so deleting it would
+    have failed nothing. Both proofs below pass every other check the verifier
+    makes, so the unit checks alone stand between them and acceptance.
+    """
+    P = self.paillier
+    pk, n, n2 = self.pk, self.pk.n, self.pk.n2
+
+    # --- the all-zeros proof ------------------------------------------------
+    # With a = z = 0 the equation reads 0 = 0 for any statement and any
+    # challenge, leaving only the challenge sum to satisfy. Against a
+    # ciphertext of 2, this "proves" that 2 is a bit.
+    c, _ = self._encrypt(2)
+    H = self.gen([0, 0])
+    e0 = P.random_lt(P.CHALLENGE_MODULUS)
+    zeros = P.PaillierZKDisjunctiveProof([
+      P.PaillierZKProof(0, e0, 0),
+      P.PaillierZKProof(0, (H - e0) % P.CHALLENGE_MODULUS, 0)])
+
+    self.assertEqual(_audit_disjunctive_proof(c, self.bits, zeros, self.gen),
+                     _FAILS_ONLY_THE_UNIT_CHECK)
+    self.assertFalse(
+      c.verify_disjunctive_encryption_proof(self.bits, zeros, self.gen),
+      'the all-zeros proof verified: a ciphertext of 2 passed as a bit')
+
+    # --- a response that is a multiple of p ---------------------------------
+    # An honest proof for a ciphertext of 1, except that the simulated branch
+    # draws its response as a multiple of p and solves for its commitment as
+    # usual. Every equation holds and the challenges sum to the hash; only z
+    # (and with it a) now shares the factor p with n.
+    c, r = self._encrypt(1)
+    p = self.sk.p
+
+    u0 = c._statement_for(self.bits[0])
+    e0 = P.random_lt(P.CHALLENGE_MODULUS)
+    z0 = (p * P.random_z_star_n(n)) % n
+    a0 = (pow(z0, n, n2) * pow(pow(u0, e0, n2), -1, n2)) % n2
+
+    s = P.random_z_star_n(n)
+    a1 = pow(s, n, n2)
+    e1 = (self.gen([a0, a1]) - e0) % P.CHALLENGE_MODULUS
+    z1 = (s * pow(pk.proof_witness(r), e1, n)) % n
+
+    shared = P.PaillierZKDisjunctiveProof([
+      P.PaillierZKProof(a0, e0, z0), P.PaillierZKProof(a1, e1, z1)])
+
+    self.assertEqual(math.gcd(z0, n), p)
+    self.assertEqual(_audit_disjunctive_proof(c, self.bits, shared, self.gen),
+                     _FAILS_ONLY_THE_UNIT_CHECK)
+    self.assertFalse(
+      c.verify_disjunctive_encryption_proof(self.bits, shared, self.gen),
+      'a proof whose response shares the factor p with n verified')
+
   # --- proof serialization ------------------------------------------------
 
   def test_disjunctive_proof_serializes_as_a_bare_array(self):
@@ -1020,10 +1353,10 @@ class SchemeAgnosticWorkflowTests(unittest.TestCase):
     # Paillier, additive 0 under DJN §4.1 where the randomness is an exponent.
     self.assertEqual(medium_keypair().pk.randomness_identity, 1,
                      'standard Paillier accumulates randomness multiplicatively')
-    self.assertEqual(
-      paillier.PaillierKeyPair.from_primes(
-        MEDIUM_P, MEDIUM_Q, use_djn_41=True).pk.randomness_identity, 0,
-      'under DJN §4.1 randomness is an exponent and accumulates additively')
+    for mode in ('short', 'long'):
+      self.assertEqual(
+        djn_keypair(mode).pk.randomness_identity, 0,
+        'under DJN §4.1 randomness is an exponent and accumulates additively')
 
   def test_paillier_ballot_through_helios_encrypted_answer(self):
     """A Paillier ballot built by Helios's own EncryptedAnswer, and verified."""
@@ -1149,373 +1482,637 @@ class SchemeAgnosticWorkflowTests(unittest.TestCase):
     self.assertEqual((rebuilt[0][0].alpha, rebuilt[0][0].beta), (11, 22))
 
 
-class DJN41Tests(unittest.TestCase):
+class DJN41KeyTests(unittest.TestCase):
   """
-  DJN §4.1 — the alternative encryption function, behind a flag.
-
-  Replaces the blinding factor v^n (2048-bit exponent) with h^r for a fixed
-  public h and a short r. The reason it costs no new proof theory is that h is
-  ITSELF an n-th residue, so h^r stays an n-th power and Pi_root applies
-  unchanged.
-
-  Everything here is about proving that last sentence, and about proving the
-  standard path is untouched.
+  DJN §4.1 at the level of the key: what §4.1 asks of p and q, how a key records
+  its mode, the retired key format, and the JavaScript ishaq canary across all
+  three modes. Per-mode behaviour is in DJN41ShortTests and DJN41LongTests.
   """
 
   def setUp(self):
     from helios.crypto import paillier
     self.paillier = paillier
-    self.gen = paillier.paillier_disjunctive_challenge_generator
 
-  def _kp(self, djn41):
-    return self.paillier.PaillierKeyPair.from_primes(
-      MEDIUM_P, MEDIUM_Q, use_djn_41=djn41)
+  def test_the_fixed_primes_meet_the_djn41_conditions(self):
+    from Crypto.Util import number
 
-  # --- the property the whole optimization rests on ------------------------
+    self.assertEqual((DJN_P * DJN_Q).bit_length(), 1024)
+    for prime in (DJN_P, DJN_Q):
+      self.assertEqual(prime.bit_length(), 512)
+      self.assertEqual(prime % 4, 3)
+      self.assertTrue(number.isPrime(prime))
+      self.assertTrue(number.isPrime((prime - 1) // 2), 'not a safe prime')
+    self.assertEqual(math.gcd(DJN_P - 1, DJN_Q - 1), 2)
 
-  def test_witness_is_a_valid_nth_root(self):
+    self.paillier.check_djn41_primes(DJN_P, DJN_Q)   # must not raise
+
+  def test_generated_safe_primes_always_give_a_full_width_modulus(self):
     """
-    h = g'^(2n), so h^r = (g'^(2r))^n and the voter can compute the root with a
-    SHORT exponent. If this fails, Pi_root has no witness and every ballot
-    proof is unprovable.
+    generate_safe_prime keeps every prime above sqrt(2) * 2^(bits-1), as
+    getStrongPrime does for standard keys. Without that bound, the product of
+    two bits-bit safe primes is one bit short ~39% of the time -- which is how
+    the full-size key generation test once drew a 2047-bit n. Checked here at
+    256 bits, where safe primes are cheap.
     """
-    kp = self._kp(True)
-    pk = kp.pk
+    from Crypto.Util import number
 
-    for _ in range(20):
-      r = pk.random_randomness()
-      blinding = pow(pk.h, r, pk.n2)
-      witness = pk.proof_witness(r)
+    bits = 256
+    bound = math.isqrt(1 << (2 * bits - 1))    # floor(sqrt(2) * 2^(bits-1))
+    primes = [self.paillier.generate_safe_prime(bits) for _ in range(4)]
 
-      self.assertEqual(pow(witness, pk.n, pk.n2), blinding)
-      self.assertEqual(math.gcd(witness, pk.n), 1, 'witness must be in Z*_n')
+    for p in primes:
+      self.assertEqual(p.bit_length(), bits)
+      self.assertGreater(p, bound)
+      self.assertTrue(number.isPrime(p))
+      self.assertTrue(number.isPrime((p - 1) // 2), 'not a safe prime')
 
-  def test_h_is_verifiably_an_nth_residue(self):
-    kp = self._kp(True)
-    pk = kp.pk
-    self.assertEqual(pow(pk.g_prime, 2 * pk.n, pk.n2), pk.h)
+    for i, p in enumerate(primes):
+      for q in primes[i + 1:]:
+        self.assertEqual((p * q).bit_length(), 2 * bits)
 
-  def test_short_exponent_is_actually_short(self):
+  def test_from_primes_refuses_primes_that_are_not_safe(self):
     """
-    The whole point. A regression that sampled Z*_n here would still verify and
-    still decrypt -- it would simply be slower than the path it replaced, with
-    nothing failing to say so.
+    Ordinary primes serve standard Paillier and not §4.1. Each pair below is
+    refused in both DJN modes, and by the check it breaks -- asserted by
+    message.
     """
-    from helios.crypto.paillier import DJN41_EXPONENT_BITS
+    from Crypto.Util import number
 
-    kp = self._kp(True)
-    for _ in range(20):
-      r = kp.pk.random_randomness()
-      self.assertLess(r.bit_length(), DJN41_EXPONENT_BITS + 1)
-      self.assertLess(r, 1 << DJN41_EXPONENT_BITS)
-
-    # ...and encrypt_return_r must draw through random_randomness(), not
-    # sample Z*_n directly. This is the bug that shipped and was caught.
-    _, r = kp.pk.encrypt_return_r(self.paillier.PaillierPlaintext(1, kp.pk))
-    self.assertLess(r.bit_length(), DJN41_EXPONENT_BITS + 1,
-                    'encrypt_return_r is not using the short exponent')
-
-  # --- correctness in the new mode ----------------------------------------
-
-  def test_decryption_correctness(self):
-    kp = self._kp(True)
-    for m in (0, 1, 2, 12, 10 ** 6):
-      c = kp.pk.encrypt(self.paillier.PaillierPlaintext(m, kp.pk))
-      self.assertEqual(kp.sk.decryption_factor(c), m)
-      self.assertEqual(kp.sk.decrypt_no_crt(c), m)
-
-  def test_homomorphic_addition(self):
-    kp = self._kp(True)
-    P = self.paillier
-    c1 = kp.pk.encrypt(P.PaillierPlaintext(7, kp.pk))
-    c2 = kp.pk.encrypt(P.PaillierPlaintext(5, kp.pk))
-    self.assertEqual(kp.sk.decryption_factor(c1 * c2), 12)
-
-  def test_ballot_proofs_verify_in_both_modes(self):
     P = self.paillier
 
-    for djn41 in (False, True):
-      with self.subTest(djn41=djn41):
-        kp = self._kp(djn41)
-        pk = kp.pk
+    # a 512-bit prime that is 3 mod 4 but not safe: it breaks nothing else
+    while True:
+      ordinary = number.getPrime(512)
+      if ordinary % 4 == 3 and not number.isPrime((ordinary - 1) // 2):
+        break
 
-        plaintexts = pk.generate_plaintexts(0, 1)
-        for bit in (0, 1):
-          c, r = pk.encrypt_return_r(P.PaillierPlaintext(bit, pk))
-          proof = c.generate_disjunctive_encryption_proof(
-            plaintexts, bit, r, self.gen)
-          self.assertTrue(
-            c.verify_disjunctive_encryption_proof(plaintexts, proof, self.gen))
+    cases = [
+      ('the medium test primes', MEDIUM_P, MEDIUM_Q, 'not a safe prime'),
+      ('one safe prime, one not', DJN_P, ordinary, 'q is not a safe prime'),
+      ('p = 1 mod 4', 1000033, DJN_Q, '3 mod 4'),
+      ('p composite, (p-1)/2 prime', 15, DJN_Q, 'p is not prime'),
+      ('p = q', DJN_P, DJN_P, 'distinct'),
+    ]
+    for mode in ('short', 'long'):
+      for label, p, q, message in cases:
+        with self.subTest(mode=mode, case=label):
+          with self.assertRaisesRegex(ValueError, message):
+            P.PaillierKeyPair.from_primes(p, q, djn41_mode=mode)
 
-  def test_overall_proof_and_combined_witness(self):
+    # ...while standard Paillier still takes ordinary primes
+    kp = P.PaillierKeyPair.from_primes(DJN_P, ordinary)
+    self.assertFalse(kp.pk.uses_djn_41)
+
+  def test_unknown_modes_are_refused(self):
+    P = self.paillier
+    for mode in ('on', 'medium', True, None):
+      with self.subTest(mode=mode):
+        with self.assertRaises(ValueError):
+          P.Paillier(djn41_mode=mode)
+        with self.assertRaises(ValueError):
+          P.PaillierKeyPair.from_primes(DJN_P, DJN_Q, djn41_mode=mode)
+
+  def test_the_model_offers_exactly_the_crypto_modes(self):
+    from helios.models import Election
+
+    self.assertEqual([mode for mode, _ in Election.PAILLIER_DJN41_MODES],
+                     list(self.paillier.DJN41_MODES))
+
+  def test_standard_key_serializes_as_exactly_n_and_g(self):
     """
-    The combined witness is where the two modes genuinely differ: standard
-    multiplies witnesses mod n, §4.1 adds exponents.
+    A standard key must NOT gain null h/hn/djn41_mode fields. Stored elections
+    and the B8 ballot-size canary both depend on this -- including for a
+    standard key that happens to sit on safe primes.
+    """
+    pk = djn_keypair('off').pk
+    self.assertIsNone(pk.h)
+    self.assertIsNone(pk.hn)
+    self.assertEqual(set(pk.to_dict()), {'n', 'g'})
+
+    for hint in ('paillier/PublicKey', 'legacy/EGPublicKey'):
+      with self.subTest(hint=hint):
+        serialized = datatypes.LDObject.instantiate(pk, datatype=hint).toDict()
+        self.assertEqual(serialized, {'n': str(pk.n), 'g': str(pk.g)})
+
+        back = datatypes.LDObject.fromDict(serialized, type_hint=hint).wrapped_obj
+        self.assertEqual(back.djn41_mode, 'off')
+        self.assertIsNone(back.h)
+        self.assertEqual(back, pk)
+
+  def test_the_retired_key_format_is_refused(self):
+    """
+    The construction this replaced serialized as {n, g, h, g_prime}, with no
+    mode. Read as a standard key it would quietly run an election labelled
+    'short' as 'off', so every loader refuses it.
     """
     P = self.paillier
+    pk = djn_keypair('short').pk
+    retired = {'n': str(pk.n), 'g': str(pk.g), 'h': str(pk.hn), 'g_prime': '5'}
 
-    for djn41 in (False, True):
-      with self.subTest(djn41=djn41):
-        kp = self._kp(djn41)
-        pk = kp.pk
+    with self.assertRaisesRegex(Exception, 'retired'):
+      P.PaillierPublicKey.from_dict(retired)
 
-        sum_plaintexts = pk.generate_plaintexts(0, 12)
-        C, V, selected = 0, pk.randomness_identity, 0
-        for i in range(20):
-          bit = 1 if i < 5 else 0
-          c, r = pk.encrypt_return_r(P.PaillierPlaintext(bit, pk))
-          C = c * C
-          V = pk.combine_randomness(V, r)
-          selected += bit
+    for hint in ('paillier/PublicKey', 'legacy/EGPublicKey'):
+      with self.subTest(hint=hint):
+        with self.assertRaisesRegex(Exception, 'retired'):
+          datatypes.LDObject.fromDict(retired, type_hint=hint)
 
-        proof = C.generate_disjunctive_encryption_proof(
-          sum_plaintexts, selected, V, self.gen)
-        self.assertTrue(C.verify_disjunctive_encryption_proof(
-          sum_plaintexts, proof, self.gen))
-        self.assertEqual(kp.sk.decryption_factor(C), 5)
+  # --- test 11, the JavaScript ishaq canary, in every mode -----------------
 
-  def test_randomness_identity_matches_the_operation(self):
-    self.assertEqual(self._kp(False).pk.randomness_identity, 1)  # multiplicative
-    self.assertEqual(self._kp(True).pk.randomness_identity, 0)   # additive
-
-  def test_soundness_still_holds(self):
-    """A ciphertext of 2 must not be provable as 0-or-1 under §4.1 either."""
-    P = self.paillier
-    kp = self._kp(True)
-    pk = kp.pk
-
-    plaintexts = pk.generate_plaintexts(0, 1)
-    c, r = pk.encrypt_return_r(P.PaillierPlaintext(2, pk))
-    for claimed in (0, 1):
-      proof = c.generate_disjunctive_encryption_proof(
-        plaintexts, claimed, r, self.gen)
-      self.assertFalse(
-        c.verify_disjunctive_encryption_proof(plaintexts, proof, self.gen))
-
-  def test_decryption_proof_unchanged(self):
+  def test_11_javascript_response_distribution_all_modes(self):
     """
-    The trustee still recovers an n-th root via u^(n^-1 mod lambda), because
-    h^r is an n-th power. §2.8 needs no modification.
-    """
-    P = self.paillier
-    kp = self._kp(True)
-
-    c = kp.pk.encrypt(P.PaillierPlaintext(42, kp.pk))
-    m, proof = kp.sk.decryption_factor_and_proof(c)
-
-    self.assertEqual(m, 42)
-    self.assertTrue(kp.pk.verify_decryption_proof(c, m, proof))
-    self.assertFalse(kp.pk.verify_decryption_proof(c, 41, proof))
-
-  # --- the standard path must be untouched ---------------------------------
-
-  def test_standard_key_serialization_is_unchanged(self):
-    """
-    A standard key must NOT gain null h/g_prime fields. Stored elections and
-    the B8 ballot-size canary both depend on this.
-    """
-    kp = self._kp(False)
-    d = kp.pk.to_dict()
-
-    self.assertEqual(set(d), {'n', 'g'})
-
-    ld = datatypes.LDObject.instantiate(kp.pk, datatype='paillier/PublicKey')
-    self.assertEqual(set(ld.toDict()), {'n', 'g'})
-
-  def test_djn41_key_round_trips_with_its_parameters(self):
-    kp = self._kp(True)
-    d = kp.pk.to_dict()
-    self.assertEqual(set(d), {'n', 'g', 'h', 'g_prime'})
-
-    ld = datatypes.LDObject.instantiate(kp.pk, datatype='paillier/PublicKey')
-    serialized = ld.toDict()
-    self.assertEqual(set(serialized), {'n', 'g', 'h', 'g_prime'})
-
-    back = datatypes.LDObject.fromDict(serialized,
-                                       type_hint='paillier/PublicKey').wrapped_obj
-    self.assertTrue(back.uses_djn_41, 'mode did not survive the round trip')
-    self.assertEqual(back.h, kp.pk.h)
-    self.assertEqual(back.g_prime, kp.pk.g_prime)
-
-    # and it still encrypts correctly after the round trip
-    from helios.crypto import paillier as P
-    c, r = back.encrypt_return_r(P.PaillierPlaintext(3, back))
-    self.assertEqual(kp.sk.decryption_factor(c), 3)
-
-  def test_standard_key_round_trips_as_standard(self):
-    kp = self._kp(False)
-    ld = datatypes.LDObject.instantiate(kp.pk, datatype='paillier/PublicKey')
-    back = datatypes.LDObject.fromDict(ld.toDict(),
-                                       type_hint='paillier/PublicKey').wrapped_obj
-    self.assertFalse(back.uses_djn_41)
-    self.assertIsNone(back.h)
-
-  def test_validation_rejects_a_forged_h(self):
-    """
-    h must be a verifiable n-th residue. A substituted h would make every
-    ballot proof unprovable, and worse, would do so only at proving time.
-    """
-    from helios.crypto import paillier as P
-
-    kp = P.Paillier(key_size=1024, use_djn_41=True).generate_keypair()
-    kp.pk.validate_pk_params()   # must not raise
-
-    kp.pk.h = (kp.pk.h + 1) % kp.pk.n2
-    with self.assertRaises(Exception):
-      kp.pk.validate_pk_params()
-
-  def test_11_javascript_response_distribution_both_modes(self):
-    """
-    Test 11 (the ishaq canary) on the JAVASCRIPT side, in both modes.
+    Test 11 (the ishaq canary) on the JAVASCRIPT side, in all three modes.
 
     This is the test whose absence let a real ballot-secrecy bug ship. Test 11
     existed only in Python, and Python was correct; the booth's
     Paillier.Proof.generate/simulate drew their randomness from
     pk.randomRandomness(), which DJN §4.1 redefines from "uniform on Z*_n" to
-    "a short exponent". Simulated branches came out ~510 bits against the real
-    branch's ~2045, so the voter's selection was readable off the ballot.
+    an exponent from a narrower range. Simulated branches came out ~510 bits
+    against the real branch's ~2045, so the voter's selection was readable off
+    the ballot.
 
     Every proof still verified and cross-language agreement still passed. Only
     a 12% shift in ballot size gave it away.
+
+    Every mode runs on the fixed safe primes' 1024-bit n, which the modulus
+    must stay well clear of what each comparison measures: a 'short' exponent
+    is 512 bits there, so the bug would put simulated responses ~512 bits
+    below real ones. A 'long' exponent is one bit narrower than n, which bit
+    length cannot see -- hence the above-n/2 count (see _canary_alarms, and
+    test 11d for proof that it is needed).
     """
     import shutil
-    import subprocess
-    import tempfile
 
     if not shutil.which('node'):
       self.skipTest('node not available')
 
-    script = os.path.join(os.path.dirname(__file__), 'js_bridge',
-                          'check_response_distribution.js')
+    for mode in self.paillier.DJN41_MODES:
+      with self.subTest(djn41_mode=mode):
+        verdict = _run_node_bridge(self, 'check_response_distribution.js',
+                                   djn_keypair(mode).pk.to_dict(),
+                                   str(CANARY_TRIALS))
 
-    for djn41 in (False, True):
-      with self.subTest(djn41=djn41):
-        # 384-bit primes, not 1024. The property under test is structural --
-        # do real and simulated responses have the same bit-length
-        # distribution -- and it shows at any modulus WIDER THAN the DJN §4.1
-        # short exponent. |n| = 640 against a 512-bit exponent still separates
-        # the two by ~128 bits if the bug returns -- twenty-five times the 5-bit
-        # threshold -- while keeping this fast enough to live in the default
-        # suite rather than in a slow tier nobody runs.
-        #
-        # A toy key would NOT work: with |n| below 512 bits the short exponent
-        # is the LONGER of the two and the comparison inverts.
-        # Built from explicit primes rather than Paillier(key_size=...):
-        # getStrongPrime refuses anything below 512 bits, and strong primes are
-        # not what this test needs -- only a modulus wider than the short
-        # exponent.
-        from Crypto.Util import number
-        from helios.crypto import paillier as P
-
-        p = number.getPrime(320)
-        q = number.getPrime(320)
-        while q == p:
-          q = number.getPrime(320)
-        kp = P.PaillierKeyPair.from_primes(p, q, use_djn_41=djn41)
-
-        self.assertGreater(kp.pk.n.bit_length(), P.DJN41_EXPONENT_BITS,
-                           'modulus must exceed the short exponent or the '
-                           'bit-length comparison is meaningless')
-
-        with tempfile.NamedTemporaryFile('w', suffix='.json',
-                                         delete=False) as f:
-          json.dump(kp.pk.to_dict(), f)
-          path = f.name
-        try:
-          proc = subprocess.run(['node', script, path, '12'],
-                                capture_output=True, text=True, timeout=1800)
-          try:
-            verdict = json.loads(proc.stdout)
-          except json.JSONDecodeError:
-            self.fail(f'js bridge produced no verdict\n'
-                      f'stderr: {proc.stderr[-2000:]}')
-        finally:
-          os.unlink(path)
-
-        self.assertEqual(verdict['uses_djn_41'], djn41)
+        self.assertEqual(verdict['djn41_mode'], mode,
+                         'the booth parsed the key in a different mode')
         self.assertTrue(verdict['all_verified'])
+        self.assertEqual(
+          [], _canary_alarms(verdict),
+          f'JS real and simulated responses are distinguishable under '
+          f'{mode!r}, so the real branch -- the vote -- can be read off the '
+          f'ballot. Check that Proof.generate and Proof.simulate use '
+          f'randomZStarN(), not randomRandomness().')
 
-        # Threshold 5 bits, not 1. The bit length of a uniform value in Z*_n is
-        # ~2047 with a variance near 2, so at 24 samples per group the standard
-        # error of each mean is ~0.3 bits and a difference of ~1 bit is ordinary
-        # noise. The failure this guards against moved the means ~1500 bits
-        # apart. Five bits sits three orders of magnitude below the effect and
-        # an order of magnitude above the noise, so it neither flakes nor
-        # forgives.
-        self.assertLess(
-          verdict['delta_bits'], 5.0,
-          f'JS real responses average {verdict["real_mean_bits"]:.1f} bits and '
-          f'simulated {verdict["simulated_mean_bits"]:.1f} '
-          f'(djn41={djn41}) — the real branch is identifiable by bit length '
-          f'and ballot secrecy is gone. Check that Proof.generate and '
-          f'Proof.simulate use randomZStarN(), not randomRandomness().')
-
-        d, d_crit = _two_sample_ks(verdict['real_bits'],
-                                   verdict['simulated_bits'])
-        self.assertLess(d, d_crit,
-                        f'KS statistic {d:.4f} exceeds critical {d_crit:.4f} '
-                        f'(djn41={djn41})')
-
-  def test_djn41_cross_language_agreement(self):
+  def test_11d_javascript_canary_catches_the_historic_bug(self):
     """
-    Test 9 extended to the new mode: a §4.1 ballot proof built by the booth's
-    JavaScript must verify in Python, and vice versa.
+    Guards the guard, as test 11b does for Python. The historic booth bug is
+    put back -- proofs drawing from randomRandomness() -- and the canary must
+    raise the alarm in both DJN modes. Under 'long' only the above-n/2 count
+    can: by bit length the two groups sit within a bit of each other.
     """
     import shutil
-    import subprocess
-    import tempfile
+
+    if not shutil.which('node'):
+      self.skipTest('node not available')
+
+    for mode in ('short', 'long'):
+      with self.subTest(djn41_mode=mode):
+        verdict = _run_node_bridge(self, 'check_response_distribution.js',
+                                   djn_keypair(mode).pk.to_dict(), '16',
+                                   '--reintroduce-bug')
+
+        self.assertTrue(verdict['all_verified'],
+                        'the bug is invisible to verification -- the point')
+
+        alarms = _canary_alarms(verdict)
+        self.assertIn('0 of 16 simulated responses above n/2', alarms)
+
+        if mode == 'short':
+          self.assertGreater(verdict['delta_bits'], 100)
+        else:
+          self.assertLess(verdict['delta_bits'], 5.0,
+                          'expected bit length alone to miss the long-mode bug')
+
+
+class _DJN41ModeTests:
+  """
+  DJN §4.1 behaviour, run once per mode by DJN41ShortTests and DJN41LongTests.
+
+  Every test uses the fixed safe primes (|n| = 1024), so the suite never waits
+  on safe-prime generation; PaillierKeyGenerationTests keeps the one full-size
+  key generation.
+  """
+
+  MODE = None
+
+  def setUp(self):
+    from helios.crypto import paillier
+    self.paillier = paillier
+    self.gen = paillier.paillier_disjunctive_challenge_generator
+    self.kp = djn_keypair(self.MODE)
+    self.pk, self.sk = self.kp.pk, self.kp.sk
+    self.bits = self.pk.generate_plaintexts(0, 1)
+
+  def _encrypt(self, m):
+    return self.pk.encrypt_return_r(self.paillier.PaillierPlaintext(m, self.pk))
+
+  def _sum_of(self, votes):
+    """The homomorphic sum of Enc(v) over `votes`, and its combined randomness."""
+    C, R = 0, self.pk.randomness_identity
+    for v in votes:
+      c, r = self._encrypt(v)
+      C = c * C
+      R = self.pk.combine_randomness(R, r)
+    return C, R
+
+  # --- the key ------------------------------------------------------------
+
+  def test_the_key_carries_its_mode(self):
+    self.assertEqual(self.pk.djn41_mode, self.MODE)
+    self.assertTrue(self.pk.uses_djn_41)
+
+  def test_hn_is_h_to_the_n(self):
+    pk = self.pk
+    self.assertTrue(0 < pk.h < pk.n)
+    self.assertEqual(math.gcd(pk.h, pk.n), 1)
+    self.assertEqual(pk.hn, pow(pk.h, pk.n, pk.n2))
+
+  def test_h_is_minus_a_square(self):
+    """
+    DJN's base is h = -x^2 mod n, not a square. With p = q = 3 (mod 4), -1 is a
+    non-residue mod both primes, so h is a non-residue mod p and mod q while -h
+    is a residue mod both. The construction this replaced used a square, g'^2,
+    and fails the second assertion.
+    """
+    for prime in (self.sk.p, self.sk.q):
+      def legendre(a):
+        return pow(a % prime, (prime - 1) // 2, prime)
+
+      self.assertEqual(legendre(-self.pk.h), 1, '-h is not a square')
+      self.assertEqual(legendre(self.pk.h), prime - 1, 'h is a square')
+
+  def test_validation_checks_each_djn41_parameter(self):
+    """
+    validate_pk_params in a DJN mode: 0 < h < n, gcd(h, n) = 1,
+    hn = h^n mod n^2, and a mode in {short, long}. Each forgery below breaks
+    exactly one of those and must be refused by THAT check, asserted by
+    message, so that a rejection for some other reason cannot stand in for it.
+    """
+    P = self.paillier
+    pk, p = self.pk, self.sk.p
+    n, n2 = pk.n, pk.n2
+
+    def forged(**changes):
+      fields = dict(n=n, g=n + 1, h=pk.h, hn=pk.hn, djn41_mode=self.MODE)
+      fields.update(changes)
+      return P.PaillierPublicKey(**fields)
+
+    cases = [
+      ('forged hn', forged(hn=pk.hn * pk.hn % n2), r'hn != h\^n'),
+      # consistent hn, so only the unit check can object
+      ('h sharing a factor with n', forged(h=p, hn=pow(p, n, n2)),
+       'not a unit'),
+      # (h+n)^n = h^n mod n^2, so hn stays consistent here too
+      ('h out of range', forged(h=pk.h + n), 'out of range'),
+      ('a mode that is not short or long', forged(djn41_mode='medium'),
+       'djn41_mode must be'),
+      ('a standard key carrying h', forged(djn41_mode='off'),
+       'must not carry them'),
+      ('missing hn', forged(hn=None), 'must carry h and hn'),
+    ]
+
+    with _validation_floor(1024):
+      pk.validate_pk_params()   # the genuine key passes
+
+      for label, key, message in cases:
+        with self.subTest(label):
+          with self.assertRaisesRegex(Exception, message):
+            key.validate_pk_params()
+
+    # outside the lowered floor, the length check still comes first
+    with self.assertRaisesRegex(Exception, 'insufficient length'):
+      pk.validate_pk_params()
+
+  # --- exponents ------------------------------------------------------------
+
+  def test_exponents_come_from_the_modes_range(self):
+    """
+    'short': [0, 2^ceil(|n|/2)); 'long': [0, n // 2). Checked from both sides:
+    no draw reaches the bound, AND the draws reach the top half of the range --
+    a regression to a narrower range, such as the old fixed 512 bits, would
+    pass the first check and fail the second. encrypt_return_r's r is checked
+    too: it must draw through random_randomness.
+    """
+    pk = self.pk
+    expected = {'short': 1 << 512, 'long': pk.n // 2}[self.MODE]
+    self.assertEqual(pk.exponent_bound, expected)
+
+    draws = [pk.random_randomness() for _ in range(40)]
+    draws += [self._encrypt(1)[1] for _ in range(8)]
+
+    for r in draws:
+      self.assertTrue(0 <= r < expected, r)
+    self.assertGreaterEqual(max(draws), expected // 2,
+                            'no draw reached the top half of the range')
+
+  # --- fixed-base tables ------------------------------------------------------
+
+  def test_tables_agree_with_pow(self):
+    """
+    hn^a mod n^2 and h^a mod n from the tables must equal pow() exactly: for
+    single exponents, for 0, for a sum of 222 exponents -- a question's
+    combined randomness, longer than any one exponent -- and, through the
+    fallback, for an exponent longer than the tables.
+    """
+    P = self.paillier
+    pk = self.pk
+    T_hn, T_h = pk.fixed_base_tables()
+    self.assertEqual(len(T_hn),
+                     pk.exponent_bound.bit_length() + P.TABLE_HEADROOM_BITS)
+
+    total = sum(pk.random_randomness() for _ in range(222))
+    self.assertGreater(total.bit_length(), pk.exponent_bound.bit_length())
+
+    exponents = [0, 1, 2, pk.exponent_bound - 1, total]
+    exponents += [pk.random_randomness() for _ in range(6)]
+    for e in exponents:
+      # base=None: pow(None, ...) would raise, so a match proves the table
+      # path produced it
+      self.assertEqual(P._fixed_base_pow(None, T_hn, e, pk.n2),
+                       pow(pk.hn, e, pk.n2))
+      self.assertEqual(P._fixed_base_pow(None, T_h, e, pk.n),
+                       pow(pk.h, e, pk.n))
+
+      # and the two methods encryption and the witness call
+      self.assertEqual(pk._hn_pow(e), pow(pk.hn, e, pk.n2))
+      self.assertEqual(pk._h_pow(e), pow(pk.h, e, pk.n))
+
+    too_long = 1 << len(T_h)
+    self.assertEqual(pk._hn_pow(too_long), pow(pk.hn, too_long, pk.n2))
+    self.assertEqual(pk._h_pow(too_long), pow(pk.h, too_long, pk.n))
+
+  def test_tables_are_built_once_and_rebuilt_for_a_new_base(self):
+    pk = self.pk
+    first = pk.fixed_base_tables()
+    self.assertIs(pk.fixed_base_tables()[0], first[0],
+                  'the tables were rebuilt on a second use')
+
+    # a key whose base is replaced must not go on using the old tables
+    other = djn_keypair(self.MODE).pk
+    pk.h, pk.hn = other.h, other.hn
+    self.assertIsNot(pk.fixed_base_tables()[0], first[0])
+    self.assertEqual(pk._h_pow(12345), pow(other.h, 12345, pk.n))
+
+  # --- the witness -------------------------------------------------------------
+
+  def test_the_witness_is_a_real_nth_root(self):
+    """
+    witness^n = hn^a (mod n^2), for one exponent and for combined randomness.
+    The property the whole mode rests on: without it Pi_root has no witness
+    and every ballot proof is unprovable.
+    """
+    pk = self.pk
+    exponents = [pk.random_randomness() for _ in range(5)]
+    exponents.append(sum(exponents))
+
+    for a in exponents:
+      witness = pk.proof_witness(a)
+      self.assertEqual(pow(witness, pk.n, pk.n2), pow(pk.hn, a, pk.n2))
+      self.assertEqual(math.gcd(witness, pk.n), 1, 'witness must be in Z*_n')
+
+  # --- correctness ---------------------------------------------------------------
+
+  def test_encryption_is_djn41s_function(self):
+    """c = (1 + m*n) * hn^a mod n^2, exactly."""
+    pk = self.pk
+    c, a = self._encrypt(7)
+    self.assertEqual(c.c, (1 + 7 * pk.n) * pow(pk.hn, a, pk.n2) % pk.n2)
+
+  def test_decryption_with_and_without_crt(self):
+    for m in (0, 1, 2, 12, 10 ** 6, self.pk.n - 1):
+      c, _ = self._encrypt(m)
+      self.assertEqual(self.sk.decryption_factor(c), m, f'CRT path, m={m}')
+      self.assertEqual(self.sk.decrypt_no_crt(c), m, f'non-CRT path, m={m}')
+
+  def test_homomorphic_addition(self):
+    C, R = self._sum_of([1, 0, 1, 1, 0, 1])
+    self.assertEqual(self.sk.decryption_factor(C), 4)
+
+    # exponents ADD: the product is Enc(4) under the combined randomness
+    self.assertEqual(self.pk.randomness_identity, 0)
+    self.assertEqual(
+      C.c, self.pk.encrypt_with_r(self.paillier.PaillierPlaintext(4, self.pk),
+                                  R).c)
+
+  # --- ballot proofs -------------------------------------------------------------
+
+  def test_ballot_proofs_verify(self):
+    for bit in (0, 1):
+      c, r = self._encrypt(bit)
+      proof = c.generate_disjunctive_encryption_proof(self.bits, bit, r,
+                                                      self.gen)
+      self.assertTrue(
+        c.verify_disjunctive_encryption_proof(self.bits, proof, self.gen))
+
+  def test_the_naive_cheat_is_rejected(self):
+    """A ciphertext of 2, honestly randomized, cannot be proven a bit."""
+    c, r = self._encrypt(2)
+    for claimed in (0, 1):
+      proof = c.generate_disjunctive_encryption_proof(self.bits, claimed, r,
+                                                      self.gen)
+      self.assertFalse(
+        c.verify_disjunctive_encryption_proof(self.bits, proof, self.gen))
+
+  def test_the_oversized_challenge_forgery_is_rejected(self):
+    """
+    Test 12f's forgery in this mode. It needs only the n-th root of the
+    ciphertext's blinding factor -- here the witness h^a mod n.
+    """
+    for true_m, max_sel in ((2, 1), (13, 12)):
+      with self.subTest(true_m=true_m):
+        plaintexts = self.pk.generate_plaintexts(0, max_sel)
+        c, a = self._encrypt(true_m)
+        forged = _forge_oversized_challenge_proof(
+          c, plaintexts, true_m, self.pk.proof_witness(a), self.gen)
+
+        self.assertEqual(
+          _audit_disjunctive_proof(c, plaintexts, forged, self.gen),
+          _FAILS_ONLY_THE_RANGE_CHECK)
+        self.assertFalse(
+          c.verify_disjunctive_encryption_proof(plaintexts, forged, self.gen))
+
+  def test_overall_proof_with_combined_randomness(self):
+    """
+    Where the modes differ from standard Paillier: the overall proof's witness
+    is h raised to the SUM of the exponents. A legal count verifies, and 13
+    selections against max 12 do not.
+    """
+    sums = self.pk.generate_plaintexts(0, 12)
+
+    C, R = self._sum_of([1] * 5 + [0] * 15)
+    proof = C.generate_disjunctive_encryption_proof(sums, 5, R, self.gen)
+    self.assertTrue(C.verify_disjunctive_encryption_proof(sums, proof, self.gen))
+    self.assertEqual(self.sk.decryption_factor(C), 5)
+
+    C, R = self._sum_of([1] * 13 + [0] * 7)
+    proof = C.generate_disjunctive_encryption_proof(sums, 12, R, self.gen)
+    self.assertFalse(C.verify_disjunctive_encryption_proof(sums, proof, self.gen))
+
+  def test_decryption_proof_unchanged(self):
+    """
+    The trustee still recovers an n-th root as u^(n^-1 mod lambda): hn^a is an
+    n-th power like any other, so §2.8 needs no change.
+    """
+    c, _ = self._encrypt(42)
+    m, proof = self.sk.decryption_factor_and_proof(c)
+
+    self.assertEqual(m, 42)
+    self.assertTrue(self.pk.verify_decryption_proof(c, m, proof))
+    self.assertFalse(self.pk.verify_decryption_proof(c, 41, proof))
+
+  def test_python_response_distribution(self):
+    """
+    The ishaq canary in this mode, on the Python side: PaillierZKProof.generate
+    and simulate must draw from Z*_n, never from random_randomness(). Same
+    criteria as the JS canary (see _canary_alarms).
+    """
+    real, simulated = [], []
+    for trial in range(2 * CANARY_TRIALS):
+      real_index = trial % 2
+      c, r = self._encrypt(real_index)
+      proof = c.generate_disjunctive_encryption_proof(self.bits, real_index, r,
+                                                      self.gen)
+      for idx, p in enumerate(proof.proofs):
+        (real if idx == real_index else simulated).append(p.response)
+
+    verdict = _canary_verdict(real, simulated, self.pk.n)
+    self.assertEqual([], _canary_alarms(verdict))
+
+  # --- serialization ---------------------------------------------------------------
+
+  def test_serialization_round_trips_in_this_mode(self):
+    """
+    {n, g, h, hn, djn41_mode}, through from_dict, the paillier/PublicKey
+    datatype, the static 'legacy/EGPublicKey' hint a trustee key is stored
+    under, and inside a secret key. What comes back is equal, in the same mode,
+    and still encrypts correctly.
+    """
+    P = self.paillier
+    pk = self.pk
+
+    d = pk.to_dict()
+    self.assertEqual(set(d), {'n', 'g', 'h', 'hn', 'djn41_mode'})
+    self.assertEqual(d['djn41_mode'], self.MODE)
+
+    with _validation_floor(1024):
+      self.assertEqual(P.PaillierPublicKey.from_dict(d), pk)
+
+    for hint in ('paillier/PublicKey', 'legacy/EGPublicKey'):
+      with self.subTest(hint=hint):
+        serialized = datatypes.LDObject.instantiate(pk, datatype=hint).toDict()
+        self.assertEqual(serialized, d)
+
+        back = datatypes.LDObject.fromDict(serialized, type_hint=hint).wrapped_obj
+        self.assertIsInstance(back, P.PaillierPublicKey)
+        self.assertEqual(back, pk)
+
+        c, a = back.encrypt_return_r(P.PaillierPlaintext(3, back))
+        self.assertLess(a, pk.exponent_bound)
+        self.assertEqual(self.sk.decryption_factor(c), 3)
+
+    sk_ld = datatypes.LDObject.instantiate(self.sk, datatype='paillier/SecretKey')
+    sk_back = datatypes.LDObject.fromDict(
+      sk_ld.toDict(), type_hint='paillier/SecretKey').wrapped_obj
+    self.assertEqual(sk_back.public_key, pk)
+
+  # --- test 9 in this mode ---------------------------------------------------------
+
+  def test_cross_language_agreement(self):
+    """
+    Proofs built by the booth's JavaScript verify in Python, and Python's --
+    including a forgery that must fail -- get the same verdicts in JS.
+
+    A proof verifies whatever encryption function made its ciphertext, so
+    agreement on proofs alone would pass even if the booth ignored the key's
+    mode. So the booth also reports the mode it parsed and the randomness it
+    used, and Python re-encrypts under that randomness: the ciphertexts must
+    match exactly.
+    """
+    import shutil
 
     if not shutil.which('node'):
       self.skipTest('node not available')
 
     P = self.paillier
-    kp = self._kp(True)
-    pk = kp.pk
+    pk = self.pk
+    sums = pk.generate_plaintexts(0, 12)
 
-    plaintexts = pk.generate_plaintexts(0, 1)
-    c, r = pk.encrypt_return_r(P.PaillierPlaintext(1, pk))
-    py_proof = c.generate_disjunctive_encryption_proof(
-      plaintexts, 1, r, self.gen)
+    c, r = self._encrypt(1)
+    individual = c.generate_disjunctive_encryption_proof(self.bits, 1, r,
+                                                         self.gen)
+    C, R = self._sum_of([1] * 5 + [0] * 15)
+    overall = C.generate_disjunctive_encryption_proof(sums, 5, R, self.gen)
+    fc, fa = self._encrypt(2)
+    forged = _forge_oversized_challenge_proof(fc, self.bits, 2,
+                                              pk.proof_witness(fa), self.gen)
 
-    payload = {
+    verdict = _run_node_bridge(self, 'crosscheck_proofs.js', {
       'public_key': pk.to_dict(),
-      'cases': [{'label': 'djn41 individual bit=1',
-                 'ciphertext': c.to_dict(), 'min': 0, 'max': 1,
-                 'real_index': 1, 'proof': py_proof.to_dict(),
-                 'should_verify': True}],
-      'generate': [{'label': 'js djn41 individual bit=1', 'kind': 'individual',
-                    'min': 0, 'max': 1, 'real_index': 1},
-                   {'label': 'js djn41 overall L=13', 'kind': 'overall',
-                    'min': 0, 'max': 12, 'selected': 5, 'n_slots': 20}],
-    }
+      'cases': [
+        {'label': 'python individual bit=1', 'ciphertext': c.to_dict(),
+         'min': 0, 'max': 1, 'real_index': 1,
+         'proof': individual.to_dict(), 'should_verify': True},
+        {'label': 'python overall L=13, 5 selected', 'ciphertext': C.to_dict(),
+         'min': 0, 'max': 12, 'real_index': 5,
+         'proof': overall.to_dict(), 'should_verify': True},
+        {'label': 'python forgery: Enc(2) as a bit', 'ciphertext': fc.to_dict(),
+         'min': 0, 'max': 1, 'real_index': None,
+         'proof': forged.to_dict(), 'should_verify': False},
+      ],
+      'generate': [
+        {'label': 'js individual bit=1', 'kind': 'individual',
+         'min': 0, 'max': 1, 'real_index': 1},
+        {'label': 'js overall L=13, 5 selected', 'kind': 'overall',
+         'min': 0, 'max': 12, 'selected': 5, 'n_slots': 20},
+      ],
+    })
 
-    script = os.path.join(os.path.dirname(__file__), 'js_bridge',
-                          'crosscheck_proofs.js')
-    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
-      json.dump(payload, f)
-      path = f.name
-    try:
-      proc = subprocess.run(['node', script, path],
-                            capture_output=True, text=True, timeout=600)
-      try:
-        verdict = json.loads(proc.stdout)
-      except json.JSONDecodeError:
-        self.fail(f'js bridge produced no verdict\nstderr: {proc.stderr[-2000:]}')
-    finally:
-      os.unlink(path)
+    self.assertEqual(verdict['djn41_mode'], self.MODE,
+                     'the booth parsed the key in a different mode')
 
     for v in verdict['verified']:
-      self.assertTrue(v['ok'], f'JS rejected a Python §4.1 proof: {v["label"]}')
+      self.assertTrue(v['ok'], f'JS disagreed with Python on "{v["label"]}": '
+                               f'expected {v["expected"]}, got {v["got"]}')
 
+    self.assertEqual(len(verdict['generated']), 2)
     for g in verdict['generated']:
       self.assertTrue(g['self_verifies'], g['label'])
 
       ct = P.PaillierCiphertext.from_dict(g['ciphertext'], pk)
-      pts = pk.generate_plaintexts(g['min'], g['max'])
+      plaintexts = pk.generate_plaintexts(g['min'], g['max'])
       proof = P.PaillierZKDisjunctiveProof.from_dict(g['proof'])
       self.assertTrue(
-        ct.verify_disjunctive_encryption_proof(pts, proof, self.gen),
-        f'Python rejected a JS-generated §4.1 proof: {g["label"]}')
+        ct.verify_disjunctive_encryption_proof(plaintexts, proof, self.gen),
+        f'Python rejected a JS-generated proof: {g["label"]}')
+
+      # the booth encrypted with THIS mode's function, from its range
+      a = int(g['randomness'])
+      overall_sum = g['kind'] == 'overall'
+      m = g['selected'] if overall_sum else g['min'] + g['real_index']
+      self.assertLess(a, pk.exponent_bound * (20 if overall_sum else 1))
+      self.assertEqual(
+        pk.encrypt_with_r(P.PaillierPlaintext(m, pk), a).c, ct.c,
+        f'{g["label"]}: JS and Python encrypt differently under the same '
+        f'randomness')
+
+
+class DJN41ShortTests(_DJN41ModeTests, unittest.TestCase):
+  """DJN §4.1 with DJN's own exponent length: a ceil(|n|/2)-bit exponent."""
+  MODE = 'short'
+
+
+class DJN41LongTests(_DJN41ModeTests, unittest.TestCase):
+  """DJN §4.1 with the exponent drawn from [0, n/2): DCR alone."""
+  MODE = 'long'
 
 
 class PaillierKeyGenerationTests(unittest.TestCase):
@@ -1537,6 +2134,41 @@ class PaillierKeyGenerationTests(unittest.TestCase):
 
     c = kp.pk.encrypt(paillier.PaillierPlaintext(12345, kp.pk))
     self.assertEqual(kp.sk.decryption_factor(c), 12345)
+
+  def test_djn41_keygen_produces_a_valid_2048_bit_key_on_safe_primes(self):
+    """
+    The one full-size DJN §4.1 key generation in the suite, and deliberately
+    slow: two 1024-bit safe primes take a minute or more each with
+    pycryptodome's generator. Every other DJN test uses the fixed 512-bit safe
+    primes instead. 'short' and 'long' keys are generated identically, so one
+    key serves both.
+    """
+    from Crypto.Util import number
+    from helios.crypto import paillier
+
+    kp = paillier.Paillier(key_size=1024, djn41_mode='short').generate_keypair()
+    pk, sk = kp.pk, kp.sk
+
+    self.assertEqual(number.size(pk.n), 2048)
+    self.assertEqual(pk.djn41_mode, 'short')
+    for prime in (sk.p, sk.q):
+      self.assertEqual(number.size(prime), 1024)
+      self.assertEqual(prime % 4, 3)
+      self.assertTrue(number.isPrime((prime - 1) // 2), 'not a safe prime')
+    self.assertEqual(math.gcd(sk.p - 1, sk.q - 1), 2)
+
+    pk.validate_pk_params()   # full size: must not raise
+
+    for mode, bound in (('short', 1 << 1024), ('long', pk.n // 2)):
+      with self.subTest(mode=mode):
+        pk.djn41_mode = mode
+        self.assertEqual(pk.exponent_bound, bound)
+
+        c, a = pk.encrypt_return_r(paillier.PaillierPlaintext(12345, pk))
+        self.assertLess(a, bound)
+        self.assertEqual(sk.decryption_factor(c), 12345)
+        self.assertEqual(pow(pk.proof_witness(a), pk.n, pk.n2),
+                         pow(pk.hn, a, pk.n2))
 
   def test_validate_pk_params_rejects_a_short_modulus(self):
     from helios.crypto import paillier
@@ -1765,6 +2397,26 @@ class CrossImplementationTests(unittest.TestCase):
             'max': max_sel, 'real_index': selected,
             'proof': proof.to_dict(), 'should_verify': True}
 
+  def _forged_case(self, label, true_m, max_sel):
+    """
+    The oversized-challenge forgery (test 12f), built in Python for the JS
+    verifier. It is checked to be real first -- every check but the challenge
+    range passes -- or a JS rejection would prove nothing.
+    """
+    P = self.paillier
+    plaintexts = self.pk.generate_plaintexts(0, max_sel)
+    c, r = self.pk.encrypt_return_r(P.PaillierPlaintext(true_m, self.pk))
+    proof = _forge_oversized_challenge_proof(
+      c, plaintexts, true_m, self.pk.proof_witness(r), self.gen)
+
+    self.assertEqual(_audit_disjunctive_proof(c, plaintexts, proof, self.gen),
+                     _FAILS_ONLY_THE_RANGE_CHECK,
+                     f'{label}: not a forgery that isolates the range check')
+
+    return {'label': label, 'ciphertext': c.to_dict(), 'min': 0,
+            'max': max_sel, 'real_index': None, 'proof': proof.to_dict(),
+            'should_verify': False}
+
   def test_09_cross_implementation_agreement(self):
     P = self.paillier
 
@@ -1777,6 +2429,9 @@ class CrossImplementationTests(unittest.TestCase):
       self._overall_case('overall L=13, 0 selected', 0, 20, 12),
       self._overall_case('overall L=13, 5 selected', 5, 20, 12),
       self._overall_case('overall L=13, 12 selected', 12, 20, 12),
+      self._forged_case('forged: Enc(2) as a bit, oversized challenge', 2, 1),
+      self._forged_case('forged: 13 selections on max 12, oversized challenge',
+                        13, 12),
     ]
 
     # --- decryption proofs, Python-generated ------------------------------
@@ -2112,12 +2767,12 @@ class ElectionIntegrationTests(TestCase):
 
   def test_ablation_defaults(self):
     """
-    DJN §4.1 off (it costs an extra assumption); CRT proofs on (it costs
-    nothing). An existing election created before these columns existed must
-    read the same way.
+    DJN §4.1 'off' -- standard Paillier is the thesis's main arm, and 'short'
+    costs an extra assumption; CRT proofs on (it costs nothing). An existing
+    election created before these columns existed must read the same way.
     """
     e = self._election('paillier', 'abl-default')
-    self.assertFalse(e.paillier_use_djn41)
+    self.assertEqual(e.paillier_djn41_mode, 'off')
     self.assertTrue(e.paillier_use_crt_proofs)
 
   def test_ablation_config_is_scheme_aware(self):
@@ -2125,32 +2780,37 @@ class ElectionIntegrationTests(TestCase):
                      'ElGamal has no Paillier ablations to report')
 
     pa = self._election('paillier', 'abl-pa')
-    pa.paillier_use_djn41 = True
-    self.assertEqual(pa.ablation_config,
-                     {'paillier_use_djn41': True,
-                      'paillier_use_crt_proofs': True})
+    for mode in ('off', 'short', 'long'):
+      pa.paillier_djn41_mode = mode
+      self.assertEqual(pa.ablation_config,
+                       {'paillier_djn41_mode': mode,
+                        'paillier_use_crt_proofs': True})
 
   def test_crypto_params_follow_the_election_not_a_global(self):
     """
     The switch is per election. A module-level setting could not be varied
     cell by cell, could not be recovered from a stored election, and could be
     set on the wrong process entirely.
+
+    In the DJN modes the trustee key is generated from 256-bit safe primes:
+    full-size ones take minutes, and PaillierKeyGenerationTests covers them.
     """
+    from unittest import mock
+
+    from helios import views
     from helios.views import crypto_params_for
 
-    off = self._election('paillier', 'abl-off')
-    on = self._election('paillier', 'abl-on')
-    on.paillier_use_djn41 = True
+    for mode in ('off', 'short', 'long'):
+      with self.subTest(mode=mode):
+        e = self._election('paillier', f'abl-{mode}')
+        e.paillier_djn41_mode = mode
+        self.assertEqual(crypto_params_for(e).djn41_mode, mode)
 
-    self.assertFalse(crypto_params_for(off).use_djn_41)
-    self.assertTrue(crypto_params_for(on).use_djn_41)
-
-    # ...and the generated key really carries it
-    on.generate_trustee(crypto_params_for(on))
-    self.assertTrue(on.get_helios_trustee().public_key.uses_djn_41)
-
-    off.generate_trustee(crypto_params_for(off))
-    self.assertFalse(off.get_helios_trustee().public_key.uses_djn_41)
+        # ...and the generated key, read back from the database, carries it
+        key_size = 1024 if mode == 'off' else 256
+        with mock.patch.object(views.PAILLIER_PARAMS, 'key_size', key_size):
+          e.generate_trustee(crypto_params_for(e))
+        self.assertEqual(e.get_helios_trustee().public_key.djn41_mode, mode)
 
   def test_crt_proof_setting_reaches_the_secret_key(self):
     """
@@ -2199,10 +2859,53 @@ class ElectionIntegrationTests(TestCase):
     form = ElectionForm(data={
       'short_name': 'abl-form', 'name': 'Ablation', 'description': '',
       'election_type': 'election', 'crypto_scheme': 'paillier',
-      'paillier_use_djn41': '1', 'paillier_use_crt_proofs': '0'})
+      'paillier_djn41_mode': 'long', 'paillier_use_crt_proofs': '0'})
     self.assertTrue(form.is_valid(), form.errors)
-    self.assertTrue(form.cleaned_data['paillier_use_djn41'])
+    self.assertEqual(form.cleaned_data['paillier_djn41_mode'], 'long')
     self.assertFalse(form.cleaned_data['paillier_use_crt_proofs'])
+
+  def test_djn41_mode_accepts_exactly_the_three_modes(self):
+    """
+    The mode is a three-way choice, validated as one. Absent or empty means
+    'off'. Anything else -- every spelling the old boolean accepted included --
+    is a validation error rather than a guess, because a guessed mode is how an
+    ablation cell ends up recording a configuration it never ran.
+    """
+    from helios.forms import ElectionForm
+
+    base = {'short_name': 'x', 'name': 'X', 'description': '',
+            'election_type': 'election', 'crypto_scheme': 'paillier'}
+
+    for mode in ('off', 'short', 'long'):
+      form = ElectionForm(data={**base, 'paillier_djn41_mode': mode})
+      self.assertTrue(form.is_valid(), form.errors)
+      self.assertEqual(form.cleaned_data['paillier_djn41_mode'], mode)
+
+    for data in (base, {**base, 'paillier_djn41_mode': ''}):
+      form = ElectionForm(data=data)
+      self.assertTrue(form.is_valid(), form.errors)
+      self.assertEqual(form.cleaned_data['paillier_djn41_mode'], 'off')
+
+    for spelling in ('1', '0', 'true', 'on', 'Short', 'djn41'):
+      form = ElectionForm(data={**base, 'paillier_djn41_mode': spelling})
+      self.assertFalse(form.is_valid(), f'{spelling!r} was accepted as a mode')
+      self.assertIn('paillier_djn41_mode', form.errors)
+
+  def test_the_retired_boolean_is_refused_by_name(self):
+    """
+    A caller still posting paillier_use_djn41 -- the workload harness, until it
+    learns the new field -- must fail loudly. Ignored, it would get 'off' while
+    believing it had asked for DJN §4.1.
+    """
+    from helios.forms import ElectionForm
+
+    base = {'short_name': 'x', 'name': 'X', 'description': '',
+            'election_type': 'election', 'crypto_scheme': 'paillier'}
+
+    for value in ('1', '0'):
+      form = ElectionForm(data={**base, 'paillier_use_djn41': value})
+      self.assertFalse(form.is_valid())
+      self.assertIn('paillier_djn41_mode', ' '.join(form.non_field_errors()))
 
   def test_ablation_flags_parse_every_falsey_spelling(self):
     """
@@ -2215,6 +2918,9 @@ class ElectionIntegrationTests(TestCase):
 
     The form reported valid, the election ran, the tally was correct, and the
     only symptom was that the A and B cells produced identical numbers.
+
+    The §4.1 setting has since become a three-way choice (tested above); the
+    CRT flag is still a boolean parsed from the raw post.
     """
     from helios.forms import ElectionForm
 
@@ -2222,23 +2928,16 @@ class ElectionIntegrationTests(TestCase):
             'election_type': 'election', 'crypto_scheme': 'paillier'}
 
     for spelling in ('0', 'false', 'False', '', 'off', 'no'):
-      form = ElectionForm(data={**base, 'paillier_use_djn41': spelling})
-      self.assertTrue(form.is_valid(), form.errors)
-      self.assertFalse(form.cleaned_data['paillier_use_djn41'],
-                       f'{spelling!r} should disable the flag, not enable it')
-
-    for spelling in ('1', 'true', 'True', 'on', 'yes'):
-      form = ElectionForm(data={**base, 'paillier_use_djn41': spelling})
-      self.assertTrue(form.is_valid(), form.errors)
-      self.assertTrue(form.cleaned_data['paillier_use_djn41'],
-                      f'{spelling!r} should enable the flag')
-
-    # ...and the same for the flag whose default is True
-    for spelling in ('0', 'false', ''):
       form = ElectionForm(data={**base, 'paillier_use_crt_proofs': spelling})
       self.assertTrue(form.is_valid(), form.errors)
       self.assertFalse(form.cleaned_data['paillier_use_crt_proofs'],
                        f'{spelling!r} should disable CRT proofs')
+
+    for spelling in ('1', 'true', 'True', 'on', 'yes'):
+      form = ElectionForm(data={**base, 'paillier_use_crt_proofs': spelling})
+      self.assertTrue(form.is_valid(), form.errors)
+      self.assertTrue(form.cleaned_data['paillier_use_crt_proofs'],
+                      f'{spelling!r} should enable CRT proofs')
 
   def test_crt_proofs_defaults_true_when_the_field_is_absent(self):
     """
@@ -2253,7 +2952,7 @@ class ElectionIntegrationTests(TestCase):
       'election_type': 'election', 'crypto_scheme': 'paillier'})
     self.assertTrue(form.is_valid(), form.errors)
     self.assertTrue(form.cleaned_data['paillier_use_crt_proofs'])
-    self.assertFalse(form.cleaned_data['paillier_use_djn41'])
+    self.assertEqual(form.cleaned_data['paillier_djn41_mode'], 'off')
 
   # --- the whole pipeline, through the model layer -------------------------
 
@@ -2309,6 +3008,139 @@ class ElectionIntegrationTests(TestCase):
         self.assertTrue(trustee.verify_decryption_proofs(),
                         f'{scheme} decryption proofs did not verify')
 
+  def test_djn41_election_freezes_tallies_and_decrypts(self):
+    """
+    The same pipeline in each DJN §4.1 mode: freeze -> vote -> tally ->
+    decrypt through Helios's own model methods, with an exact tally, ballots
+    whose randomness comes from the mode's range, and verifying decryption
+    proofs.
+
+    The trustee key comes from 256-bit safe primes, because full-size ones
+    take minutes each; PaillierKeyGenerationTests covers the full size.
+    Everything else is the real pipeline.
+    """
+    from unittest import mock
+
+    from helios import views
+    from helios.models import CastVote, Voter
+    from helios.views import crypto_params_for
+    from helios.workflows.homomorphic import EncryptedVote
+
+    for mode in ('short', 'long'):
+      with self.subTest(mode=mode):
+        e = self._election('paillier', f'e2e-djn-{mode}')
+        e.paillier_djn41_mode = mode
+        with mock.patch.object(views.PAILLIER_PARAMS, 'key_size', 256):
+          e.generate_trustee(crypto_params_for(e))
+        e.questions = [{
+          'answers': ['A', 'B', 'C'], 'answer_urls': [None] * 3,
+          'max': 2, 'min': 0, 'question': 'pick up to 2',
+          'short_name': 'q1', 'tally_type': 'homomorphic',
+          'result_type': 'absolute', 'choice_type': 'approval'}]
+        e.openreg = True
+        e.save()
+
+        self.assertEqual([], e.issues_before_freeze, e.issues_before_freeze)
+        e.freeze()
+        self.assertEqual(e.public_key.djn41_mode, mode)
+
+        ballots = [[0], [0, 1], [2], [0, 2], [1]]
+        for i, answer in enumerate(ballots):
+          voter = Voter.objects.create(
+            election=e, uuid=f'djn-{mode}-voter-{i}',
+            voter_login_id=f'v{i}', voter_name=f'Voter {i}',
+            voter_email=f'v{i}@example.com')
+          vote = EncryptedVote.fromElectionAndAnswers(e, [answer])
+          for r in vote.encrypted_answers[0].randomness:
+            self.assertLess(r, e.public_key.exponent_bound)
+          self.assertTrue(vote.verify(e), f'{mode} ballot {i} failed to verify')
+
+          cv = CastVote(voter=voter, vote=vote, vote_hash=vote.hash,
+                        cast_at=datetime.datetime.utcnow())
+          cv.save()
+          voter.store_vote(cv)
+
+        e.compute_tally()
+        self.assertEqual(e.encrypted_tally.num_tallied, len(ballots))
+
+        e.helios_trustee_decrypt()
+        e.combine_decryptions()
+
+        # A=3, B=2, C=2
+        self.assertEqual(e.result, [[3, 2, 2]], f'{mode} tally is wrong')
+        self.assertTrue(e.get_helios_trustee().verify_decryption_proofs(),
+                        f'{mode} decryption proofs did not verify')
+
+
+class DJN41ModeMigrationTests(TransactionTestCase):
+  """
+  Migration 0013: the boolean paillier_use_djn41 becomes paillier_djn41_mode.
+
+  True could only ever select the short-exponent variant, so it becomes
+  'short', and False becomes 'off' -- for soft-deleted elections too, which
+  the default manager would hide. And back again, where 'long' has no boolean
+  of its own and becomes True.
+  """
+
+  BEFORE = [('helios', '0012_election_paillier_use_crt_proofs_and_more')]
+  AFTER = [('helios', '0013_election_paillier_djn41_mode')]
+
+  def _migrate(self, targets):
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    executor = MigrationExecutor(connection)
+    executor.migrate(targets)
+    return executor.loader.project_state(targets).apps
+
+  def tearDown(self):
+    # leave the schema as every later test expects it, pass or fail
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+
+  def test_0013_maps_the_boolean_onto_the_mode_and_back(self):
+    import uuid as uuid_mod
+
+    apps = self._migrate(self.BEFORE)
+    User = apps.get_model('helios_auth', 'User')
+    Election = apps.get_model('helios', 'Election')
+
+    admin = User.objects.create(user_type='password', user_id='migration',
+                                name='Migration', info={})
+
+    def election(short_name, djn41, deleted_at=None):
+      return Election.objects.create(
+        admin=admin, uuid=str(uuid_mod.uuid4()), short_name=short_name,
+        name=short_name, description='', election_type='election',
+        crypto_scheme='paillier', cast_url='http://localhost/cast',
+        paillier_use_djn41=djn41, deleted_at=deleted_at).id
+
+    ids = {
+      'djn41': election('mig-djn41', True),
+      'standard': election('mig-standard', False),
+      'soft-deleted djn41': election('mig-deleted', True,
+                                     deleted_at=datetime.datetime.utcnow()),
+      'later long': election('mig-long', False),
+    }
+
+    Election = self._migrate(self.AFTER).get_model('helios', 'Election')
+    self.assertEqual(
+      {k: Election.objects.get(id=v).paillier_djn41_mode for k, v in ids.items()},
+      {'djn41': 'short', 'standard': 'off', 'soft-deleted djn41': 'short',
+       'later long': 'off'})
+
+    Election.objects.filter(id=ids['later long']).update(
+      paillier_djn41_mode='long')
+
+    Election = self._migrate(self.BEFORE).get_model('helios', 'Election')
+    self.assertEqual(
+      {k: Election.objects.get(id=v).paillier_use_djn41 for k, v in ids.items()},
+      {'djn41': True, 'standard': False, 'soft-deleted djn41': True,
+       'later long': True})
+
 
 class BoothLoaderTests(unittest.TestCase):
   """
@@ -2348,6 +3180,32 @@ class BoothLoaderTests(unittest.TestCase):
     self.assertLess(source.index('paillier.js'),
                     source.index('scheme_adapters.js'))
     self.assertLess(source.index('scheme_adapters.js'), source.index('helios.js'))
+
+  def test_audit_verifier_loaders_load_paillier(self):
+    """
+    The single-ballot audit verifier has two loaders of its own: the page, and
+    the worker it hands verification to. helios.js calls
+    CRYPTO.publicKeyFromJSONObject, which scheme_adapters.js defines, so a
+    loader that includes helios.js without it cannot even parse an election.
+    Both loaders lacked it, and every audit -- ElGamal included -- failed with
+    "CRYPTO is not defined".
+    """
+    elgamal, paillier, adapters, helios = (
+      'js/jscrypto/%s' % name for name in
+      ('elgamal.js', 'paillier.js', 'scheme_adapters.js', 'helios.js'))
+
+    for loader in ('single-ballot-verify.html', 'verifierworker.js'):
+      with self.subTest(loader=loader):
+        with open(os.path.join(self.BOOTH, loader)) as f:
+          source = f.read()
+
+        for script in (elgamal, paillier, adapters, helios):
+          self.assertIn(script, source, f'{loader} does not load {script}')
+
+        # the same order constraint as the booth worker
+        self.assertLess(source.index(elgamal), source.index(paillier))
+        self.assertLess(source.index(paillier), source.index(adapters))
+        self.assertLess(source.index(adapters), source.index(helios))
 
   def test_vote_html_references_the_rebuilt_bundle(self):
     with open(os.path.join(self.BOOTH, 'vote.html')) as f:
@@ -2478,9 +3336,13 @@ class DatatypeDispatchSpikeTests(unittest.TestCase):
                'response': '4'}, 'legacy/EGZKProof'),
       'legacy/EGZKProof')
 
-    # Paillier shapes are re-routed.
+    # Paillier shapes are re-routed -- a public key in both of its shapes.
     self.assertEqual(resolve({'n': '1', 'g': '2'}, 'legacy/EGPublicKey'),
                      'paillier/PublicKey')
+    self.assertEqual(
+      resolve({'n': '1', 'g': '2', 'h': '3', 'hn': '4', 'djn41_mode': 'short'},
+              'legacy/EGPublicKey'),
+      'paillier/PublicKey')
     self.assertEqual(resolve({'c': '1'}, 'legacy/EGCiphertext'),
                      'paillier/Ciphertext')
     self.assertEqual(

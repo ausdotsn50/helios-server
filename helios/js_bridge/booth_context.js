@@ -39,23 +39,37 @@ const SCRIPTS = [
   'js/jscrypto/helios.js',
 ];
 
-function createBoothContext(extraScripts) {
-  const sandbox = {
-    // Browser globals the booth reaches for. Kept minimal on purpose: every
-    // stub is a place where Node and the browser could diverge, so the list
-    // should stay short enough to audit.
-    window: {},
-    navigator: {appName: 'node', userAgent: 'node'},
-    console: console,
-    setInterval: () => 0,
-    clearInterval: () => {},
-    setTimeout: setTimeout,
-  };
-  sandbox.window = sandbox;
-  sandbox.self = sandbox;
-  sandbox.globalThis = sandbox;
+/*
+ * A fresh global for the booth's scripts.
+ *
+ * DONT_CONTEXTIFY gives the context an ORDINARY global object. A default,
+ * contextified sandbox routes every global lookup through an interceptor, and
+ * jsbn resolves its helpers as globals inside its inner loops: measured here,
+ * one modPow at a 2048-bit modulus with a 1024-bit exponent took ~2.1 s in a
+ * sandbox and ~56 ms with an ordinary global -- the difference between a
+ * 1024-bit test key being usable or not. The booth code runs unchanged either
+ * way; only the host's lookup path differs. A Node without the constant
+ * (before 22.8) gets a contextified empty object: correct, just slow.
+ */
+function createGlobal() {
+  const g = vm.createContext(vm.constants && vm.constants.DONT_CONTEXTIFY);
 
-  const context = vm.createContext(sandbox);
+  // Browser globals the booth reaches for. Kept minimal on purpose: every
+  // stub is a place where Node and the browser could diverge, so the list
+  // should stay short enough to audit.
+  g.window = g;
+  g.self = g;
+  g.navigator = {appName: 'node', userAgent: 'node'};
+  g.console = console;
+  g.setInterval = () => 0;
+  g.clearInterval = () => {};
+  g.setTimeout = setTimeout;
+
+  return g;
+}
+
+function createBoothContext(extraScripts) {
+  const context = createGlobal();
 
   for (const rel of SCRIPTS.concat(extraScripts || [])) {
     const file = path.join(BOOTH, rel);
@@ -98,19 +112,7 @@ function createBoothContext(extraScripts) {
  * half you notice depends on whether you test through the harness or the booth.
  */
 function createBundleContext(bundleName) {
-  const sandbox = {
-    window: {},
-    navigator: {appName: 'node', userAgent: 'node'},
-    console: console,
-    setInterval: () => 0,
-    clearInterval: () => {},
-    setTimeout: setTimeout,
-  };
-  sandbox.window = sandbox;
-  sandbox.self = sandbox;
-  sandbox.globalThis = sandbox;
-
-  const context = vm.createContext(sandbox);
+  const context = createGlobal();
   const file = path.join(BOOTH, 'js', bundleName);
   vm.runInContext(fs.readFileSync(file, 'utf8'), context, {filename: file});
 

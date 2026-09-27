@@ -87,6 +87,10 @@ function main() {
         label: spec.label, kind: spec.kind,
         min: spec.min, max: spec.max, real_index: spec.real_index,
         ciphertext: ct.toJSONObject(),
+        // so Python can re-encrypt under the same randomness: a proof verifies
+        // whatever encryption function made the ciphertext, so agreement on
+        // proofs alone would not show the booth used the key's DJN 4.1 mode
+        randomness: r.toJSONObject(),
         proof: proof.toJSONObject(),
         self_verifies: ct.verifyDisjunctiveProof(
             plaintexts, proof, P.disjunctive_challenge_generator),
@@ -111,6 +115,7 @@ function main() {
         label: spec.label, kind: spec.kind,
         min: spec.min, max: spec.max, selected: spec.selected,
         ciphertext: C.toJSONObject(),
+        randomness: V.toJSONObject(),    // the combined randomness
         proof: proof.toJSONObject(),
         self_verifies: C.verifyDisjunctiveProof(
             plaintexts, proof, P.disjunctive_challenge_generator),
@@ -120,6 +125,7 @@ function main() {
 
   console.log(JSON.stringify({
     ok: verified.every((v) => v.ok) && generated.every((g) => g.self_verifies),
+    djn41_mode: pk.djn41_mode,    // the mode the booth parsed from the key
     verified: verified,
     generated: generated,
   }, null, 2));
