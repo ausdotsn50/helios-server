@@ -4,6 +4,11 @@
  * Browser twin of helios/crypto/paillier.py. Structured as a mirror of
  * elgamal.js, which is a proven template for this exact shape.
  *
+ * Not mirrored: ElGamal.Params, ElGamal.SecretKey and ElGamal.DLogProof.
+ * Paillier has no shared group parameters (the key is n itself), key
+ * generation and decryption run only on the server, and trustees publish no
+ * proof of knowledge of the secret key.
+ *
  * BIGNUM: this file uses Helios's vendored jsbn via the BigInt wrapper in
  * bigint.js, and MUST NOT use native BigInt. Native BigInt would make Paillier
  * faster for reasons that have nothing to do with Paillier and would invalidate
@@ -15,48 +20,14 @@
 
 var Paillier = {};
 
+
 // ---------------------------------------------------------------------------
-// Challenge generation (build spec §2.9)
+// Constants
 // ---------------------------------------------------------------------------
-//
-// Byte-exact twin of paillier_disjunctive_challenge_generator in
-// helios/crypto/paillier.py. Any disagreement here means every ballot verifies
-// in the booth and every cast fails on the server, with the symptom nowhere
-// near the cause -- so helios/fixtures/challenge_vectors.json pins both
-// implementations to the same values, and milestone B1 tests it before any
-// proof code exists on either side.
 
 Paillier.CHALLENGE_BITS = 160;
 Paillier.CHALLENGE_MODULUS = BigInt.ONE.shiftLeft(160);
 
-Paillier.disjunctive_challenge_generator = function(commitments) {
-  var strings_to_hash = _(commitments).map(function(a) {
-    // toJSONObject rather than toString, matching elgamal.js's
-    // "toJSONObject instead of toString because of IE weirdness". bigint.js
-    // defines toJSONObject as this.toString(), i.e. radix 10 -- the same
-    // decimal form Python's str(int) produces.
-    return a.toJSONObject();
-  });
-
-  // SHA-1's output is exactly 160 bits, so the reduction is a no-op. It is kept
-  // because it documents the invariant that a challenge is < 2^160, which the
-  // branch-challenge summation in the disjunctive proof relies on.
-  return new BigInt(hex_sha1(strings_to_hash.join(",")), 16)
-      .mod(Paillier.CHALLENGE_MODULUS);
-};
-
-Paillier.fiatshamir_challenge_generator = function(commitment) {
-  return Paillier.disjunctive_challenge_generator([commitment]);
-};
-
-
-// ---------------------------------------------------------------------------
-// Public key
-// ---------------------------------------------------------------------------
-
-// The encryption function's mode, mirroring DJN41_MODES in
-// helios/crypto/paillier.py: 'off' is standard Paillier, v^n; 'short' and
-// 'long' are DJN 4.1's hn^a, with a from [0, 2^ceil(k/2)) or [0, n/2).
 Paillier.DJN41_MODES = ['off', 'short', 'long'];
 
 // How far past a single exponent the fixed-base tables reach. Mirrors
@@ -64,32 +35,10 @@ Paillier.DJN41_MODES = ['off', 'short', 'long'];
 // raises h to the SUM of a question's exponents.
 Paillier.TABLE_HEADROOM_BITS = 16;
 
-// [base^(2^i) mod modulus for i < bits], by repeated squaring.
-Paillier.fixedBaseTable = function(base, modulus, bits) {
-  var table = [base.mod(modulus)];
-  for (var i = 1; i < bits; i++) {
-    table.push(table[i - 1].multiply(table[i - 1]).mod(modulus));
-  }
-  return table;
-};
 
-// base^exponent mod modulus from table[i] = base^(2^i) mod modulus: one
-// multiplication per set bit of the exponent, and no squarings -- those were
-// paid once, when the table was built. Identical to modPow for every exponent;
-// one the table cannot cover (negative, or too long) simply takes modPow.
-Paillier.fixedBasePow = function(base, table, exponent, modulus) {
-  var bits = exponent.bitLength();
-  if (exponent.signum() < 0 || bits > table.length)
-    return base.modPow(exponent, modulus);
-
-  var result = BigInt.ONE;
-  for (var i = 0; i < bits; i++) {
-    if (exponent.testBit(i))
-      result = result.multiply(table[i]).mod(modulus);
-  }
-  return result;
-};
-
+// ---------------------------------------------------------------------------
+// Public key
+// ---------------------------------------------------------------------------
 Paillier.PublicKey = Class.extend({
   // h, hn and djn41_mode are the DJN 4.1 parameters, absent on a standard key.
   // The mode travels with the key because a 'short' key and a 'long' key are
@@ -102,37 +51,6 @@ Paillier.PublicKey = Class.extend({
     this.h = h || null;      // -x^2 mod n
     this.hn = hn || null;    // h^n mod n^2
     this.tables = null;      // built on first use; see fixedBaseTables
-  },
-
-  usesDJN41: function() {
-    return this.djn41_mode != 'off';
-  },
-
-  // Exclusive upper bound on one DJN 4.1 exponent: 2^ceil(k/2) under 'short',
-  // where k = |n|, and n // 2 under 'long'.
-  exponentBound: function() {
-    if (this.djn41_mode == 'short')
-      return BigInt.ONE.shiftLeft(Math.ceil(this.n.bitLength() / 2));
-    if (this.djn41_mode == 'long')
-      return this.n.shiftRight(1);
-    return null;
-  },
-
-  // {hn: [hn^(2^i) mod n^2], h: [h^(2^i) mod n]}, built on the first
-  // encryption under this key and cached on it, so every later encryption and
-  // witness reuses them. DJN 4.2's cost claim assumes exactly this
-  // precomputation. Sized like the Python side's: one exponent's bound plus
-  // TABLE_HEADROOM_BITS, and anything longer falls back to modPow.
-  fixedBaseTables: function() {
-    if (this.tables == null) {
-      var bits = this.exponentBound().bitLength() +
-                 Paillier.TABLE_HEADROOM_BITS;
-      this.tables = {
-        hn: Paillier.fixedBaseTable(this.hn, this.n2, bits),
-        h: Paillier.fixedBaseTable(this.h, this.n, bits)
-      };
-    }
-    return this.tables;
   },
 
   toJSONObject: function() {
@@ -170,6 +88,39 @@ Paillier.PublicKey = Class.extend({
 
     return new Paillier.Ciphertext(one_plus_mn.multiply(blinding).mod(this.n2),
                                    this);
+  },
+
+  // --- DJN 4.1 -------------------------------------------------------------
+
+  usesDJN41: function() {
+    return this.djn41_mode != 'off';
+  },
+
+  // Exclusive upper bound on one DJN 4.1 exponent: 2^ceil(k/2) under 'short',
+  // where k = |n|, and n // 2 under 'long'.
+  exponentBound: function() {
+    if (this.djn41_mode == 'short')
+      return BigInt.ONE.shiftLeft(Math.ceil(this.n.bitLength() / 2));
+    if (this.djn41_mode == 'long')
+      return this.n.shiftRight(1);
+    return null;
+  },
+
+  // {hn: [hn^(2^i) mod n^2], h: [h^(2^i) mod n]}, built on the first
+  // encryption under this key and cached on it, so every later encryption and
+  // witness reuses them. DJN 4.2's cost claim assumes exactly this
+  // precomputation. Sized like the Python side's: one exponent's bound plus
+  // TABLE_HEADROOM_BITS, and anything longer falls back to modPow.
+  fixedBaseTables: function() {
+    if (this.tables == null) {
+      var bits = this.exponentBound().bitLength() +
+                 Paillier.TABLE_HEADROOM_BITS;
+      this.tables = {
+        hn: Paillier.fixedBaseTable(this.hn, this.n2, bits),
+        h: Paillier.fixedBaseTable(this.h, this.n, bits)
+      };
+    }
+    return this.tables;
   },
 
   // The Pi_root witness v with u = v^n mod n^2, derived from the stored
@@ -287,28 +238,6 @@ Paillier.PublicKey.fromJSONObject = function(d) {
       BigInt.fromJSONObject(d.hn),
       mode);
 };
-
-
-// ---------------------------------------------------------------------------
-// Plaintext
-// ---------------------------------------------------------------------------
-
-Paillier.Plaintext = Class.extend({
-  // m is the integer ITSELF. There is no g^m encoding and no encode_m flag,
-  // because Paillier needs neither.
-  init: function(m, pk) {
-    this.m = m;
-    this.pk = pk;
-  },
-
-  getM: function() {
-    return this.m;
-  },
-
-  toJSONObject: function() {
-    return this.m.toJSONObject();
-  }
-});
 
 
 // ---------------------------------------------------------------------------
@@ -453,6 +382,28 @@ Paillier.Ciphertext.fromJSONObject = function(d, pk) {
 
 
 // ---------------------------------------------------------------------------
+// Plaintext
+// ---------------------------------------------------------------------------
+
+Paillier.Plaintext = Class.extend({
+  // m is the integer ITSELF. There is no g^m encoding and no encode_m flag,
+  // because Paillier needs neither.
+  init: function(m, pk) {
+    this.m = m;
+    this.pk = pk;
+  },
+
+  getM: function() {
+    return this.m;
+  },
+
+  toJSONObject: function() {
+    return this.m.toJSONObject();
+  }
+});
+
+
+// ---------------------------------------------------------------------------
 // Pi_root transcript
 // ---------------------------------------------------------------------------
 
@@ -510,6 +461,13 @@ Paillier.Proof = Class.extend({
   }
 });
 
+Paillier.Proof.fromJSONObject = function(d) {
+  return new Paillier.Proof(
+      BigInt.fromJSONObject(d.commitment),
+      BigInt.fromJSONObject(d.challenge),
+      BigInt.fromJSONObject(d.response));
+};
+
 // Honest proof that u is an n-th power with witness v.
 //
 // THE REDUCTION MODULUS IN THE RESPONSE IS NOT COSMETIC. z is reduced mod n,
@@ -546,13 +504,6 @@ Paillier.Proof.simulate = function(u, pk, challenge) {
   return new Paillier.Proof(a, challenge, z);
 };
 
-Paillier.Proof.fromJSONObject = function(d) {
-  return new Paillier.Proof(
-      BigInt.fromJSONObject(d.commitment),
-      BigInt.fromJSONObject(d.challenge),
-      BigInt.fromJSONObject(d.response));
-};
-
 
 // ---------------------------------------------------------------------------
 // Disjunctive proof — serializes as a BARE ARRAY
@@ -580,4 +531,67 @@ Paillier.DisjunctiveProof.fromJSONObject = function(d) {
 // Module-level convenience mirroring ElGamal.encrypt(pk, plaintext, r).
 Paillier.encrypt = function(pk, plaintext, r) {
   return pk.encrypt(plaintext, r);
+};
+
+
+// ---------------------------------------------------------------------------
+// DJN 4.1 fixed-base exponentiation
+// ---------------------------------------------------------------------------
+
+// [base^(2^i) mod modulus for i < bits], by repeated squaring.
+Paillier.fixedBaseTable = function(base, modulus, bits) {
+  var table = [base.mod(modulus)];
+  for (var i = 1; i < bits; i++) {
+    table.push(table[i - 1].multiply(table[i - 1]).mod(modulus));
+  }
+  return table;
+};
+
+// base^exponent mod modulus from table[i] = base^(2^i) mod modulus: one
+// multiplication per set bit of the exponent, and no squarings -- those were
+// paid once, when the table was built. Identical to modPow for every exponent;
+// one the table cannot cover (negative, or too long) simply takes modPow.
+Paillier.fixedBasePow = function(base, table, exponent, modulus) {
+  var bits = exponent.bitLength();
+  if (exponent.signum() < 0 || bits > table.length)
+    return base.modPow(exponent, modulus);
+
+  var result = BigInt.ONE;
+  for (var i = 0; i < bits; i++) {
+    if (exponent.testBit(i))
+      result = result.multiply(table[i]).mod(modulus);
+  }
+  return result;
+};
+
+
+// ---------------------------------------------------------------------------
+// Challenge generation (build spec §2.9)
+// ---------------------------------------------------------------------------
+//
+// Byte-exact twin of paillier_disjunctive_challenge_generator in
+// helios/crypto/paillier.py. Any disagreement here means every ballot verifies
+// in the booth and every cast fails on the server, with the symptom nowhere
+// near the cause -- so helios/fixtures/challenge_vectors.json pins both
+// implementations to the same values, and milestone B1 tests it before any
+// proof code exists on either side.
+
+Paillier.disjunctive_challenge_generator = function(commitments) {
+  var strings_to_hash = _(commitments).map(function(a) {
+    // toJSONObject rather than toString, matching elgamal.js's
+    // "toJSONObject instead of toString because of IE weirdness". bigint.js
+    // defines toJSONObject as this.toString(), i.e. radix 10 -- the same
+    // decimal form Python's str(int) produces.
+    return a.toJSONObject();
+  });
+
+  // SHA-1's output is exactly 160 bits, so the reduction is a no-op. It is kept
+  // because it documents the invariant that a challenge is < 2^160, which the
+  // branch-challenge summation in the disjunctive proof relies on.
+  return new BigInt(hex_sha1(strings_to_hash.join(",")), 16)
+      .mod(Paillier.CHALLENGE_MODULUS);
+};
+
+Paillier.fiatshamir_challenge_generator = function(commitment) {
+  return Paillier.disjunctive_challenge_generator([commitment]);
 };
