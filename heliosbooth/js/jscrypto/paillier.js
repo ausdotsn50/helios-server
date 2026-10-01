@@ -521,7 +521,13 @@ Paillier.DisjunctiveProof = Class.extend({
   }
 });
 
+// null in, null out, as in ElGamal.DisjunctiveProof.fromJSONObject: a question
+// with no max has no overall proof, and helios.js's verifyProofs requires it to
+// come back as null.
 Paillier.DisjunctiveProof.fromJSONObject = function(d) {
+  if (d == null)
+    return null;
+
   return new Paillier.DisjunctiveProof(
       _(d).map(function(p) {
         return Paillier.Proof.fromJSONObject(p);
