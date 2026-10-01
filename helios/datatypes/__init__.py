@@ -42,6 +42,92 @@ def recursiveToDict(obj):
     else:
         return obj.toDict()
 
+##
+## scheme dispatch
+##
+## Nine persisted LDObjectField type hints name an ElGamal-specific datatype at
+## class-definition time (models.py:69, 71, 143, 956, 1142, 1290, 1297, 1301,
+## 1308). Once a second cryptosystem exists those hints are ambiguous: a Paillier
+## public key stored in Election.public_key would be handed to the ElGamal
+## deserializer. The reach is wider than the keys -- encrypted_tally and every
+## CastVote.vote resolve down to legacy/EGCiphertext, so ballots and tallies are
+## affected too.
+##
+## Helios anticipated this. The FIXME sits on the exact line that must change:
+## "the LD type is either in d or in type_hint / FIXME: get this from the
+## dictionary itself".
+##
+## The dispatch below is deliberately NARROW. It applies only when the type hint
+## is one of the six legacy datatypes that name an ElGamal representation, and
+## only when the serialized dict's own field set identifies a different scheme.
+## Everything else passes through untouched.
+##
+
+SCHEME_AMBIGUOUS_DATATYPES = frozenset({
+    'legacy/EGPublicKey',
+    'legacy/EGSecretKey',
+    'legacy/EGCiphertext',
+    'legacy/EGZKProof',
+    'legacy/EGZKDisjunctiveProof',
+    'legacy/DLogProof',
+})
+
+
+def _resolve_by_shape(d, ld_type):
+    """
+    Resolve an ambiguous legacy datatype against the shape of the data itself.
+
+    Returns the datatype to use. Falls back to `ld_type` unchanged whenever the
+    shape is not recognisably non-ElGamal, so an unknown shape keeps today's
+    behaviour (and today's error message) rather than acquiring a new one.
+
+    The discriminators are disjoint by construction, not by convention:
+    ElGamal's public key carries 'y' and Paillier's does not; ElGamal's
+    ciphertext is {alpha, beta} and Paillier's is {c}; ElGamal's proof
+    commitment is a two-element dict {A, B} and Paillier's is a scalar, because
+    Chaum-Pedersen commits to two values where Pi_root commits to one.
+    """
+    if ld_type not in SCHEME_AMBIGUOUS_DATATYPES:
+        return ld_type
+
+    if ld_type == 'legacy/EGZKDisjunctiveProof':
+        # Serialized as a bare array. Dispatch on the first transcript.
+        if isinstance(d, list) and d:
+            inner = _resolve_by_shape(d[0], 'legacy/EGZKProof')
+            if inner != 'legacy/EGZKProof':
+                return 'paillier/ZKDisjunctiveProof'
+        return ld_type
+
+    if not isinstance(d, dict):
+        return ld_type
+
+    if ld_type == 'legacy/EGPublicKey':
+        # A standard Paillier key is {n, g}, and a DJN §4.1 key adds
+        # {h, hn, djn41_mode}. Neither carries 'y', so both route here.
+        if 'y' not in d and 'n' in d:
+            return 'paillier/PublicKey'
+
+    elif ld_type == 'legacy/EGSecretKey':
+        if 'x' not in d and {'p', 'q'} <= set(d):
+            return 'paillier/SecretKey'
+
+    elif ld_type == 'legacy/EGCiphertext':
+        if 'alpha' not in d and 'c' in d:
+            return 'paillier/Ciphertext'
+
+    elif ld_type == 'legacy/EGZKProof':
+        # A Pi_root commitment is a single value; a Chaum-Pedersen commitment is
+        # {'A': ..., 'B': ...}.
+        if 'commitment' in d and not isinstance(d['commitment'], dict):
+            return 'paillier/ZKProof'
+
+    # legacy/DLogProof is not dispatched: the Paillier arm generates no trustee
+    # proof of knowledge of the secret key (build spec §4.4), so pok is stored
+    # as null and never reaches a shape decision.
+
+    return ld_type
+
+
 def get_class(datatype):
     # already done?
     if not isinstance(datatype, str):
@@ -120,12 +206,39 @@ class LDObject(object):
 
     @classmethod
     def instantiate(cls, obj, datatype=None):
-        """FIXME: should datatype override the object's internal datatype? probably not"""
+        """
+        The FIXME this replaced asked: "should datatype override the object's
+        internal datatype? probably not". The answer turns out to be "only
+        sometimes", and the boundary matters.
+
+        A blanket flip -- object's own datatype always wins -- is what the
+        Paillier design documents prescribe, on the stated grounds that the
+        wrapped crypto classes carry no `datatype` attribute. That is true of
+        helios.crypto.elgamal.* and helios.crypto.algs.*, and false of two
+        classes that reach this method:
+
+          homomorphic.EncryptedVote.datatype -> 'legacy/EncryptedVote'
+          homomorphic.Tally.datatype         -> 'legacy/Tally'
+          models.CastVote.datatype           -> 'legacy/CastVote' (when saved)
+
+        Under a blanket flip, legacy.EncryptedVote.includeRandomness() -- which
+        asks for 'legacy/EncryptedVoteWithRandomness' -- would be overridden
+        back to 'legacy/EncryptedVote' and silently drop the randomness a voter
+        needs to audit their own ballot. legacy.CastVote.short would likewise
+        serialize a full CastVote. Both are silent: the field lists are the same
+        length and only the nested structured types differ.
+
+        So the object's datatype wins only where the caller's hint is one of the
+        six ElGamal-specific legacy datatypes, i.e. exactly where the hint is
+        ambiguous under a second cryptosystem. Every other hint is honoured.
+        """
         if isinstance(obj, LDObject):
             return obj
 
-        if hasattr(obj, 'datatype') and not datatype:
-            datatype = getattr(obj, 'datatype')
+        obj_datatype = getattr(obj, 'datatype', None)
+
+        if obj_datatype and (not datatype or datatype in SCHEME_AMBIGUOUS_DATATYPES):
+            datatype = obj_datatype
 
         if not datatype:
             raise Exception("no datatype found")
@@ -220,9 +333,11 @@ class LDObject(object):
         if d is None:
             return None
 
-        # the LD type is either in d or in type_hint
-        # FIXME: get this from the dictionary itself
-        ld_type = type_hint
+        # the LD type is either in d or in type_hint.
+        # The FIXME that stood here -- "get this from the dictionary itself" --
+        # is what _resolve_by_shape now does, for the six ambiguous legacy
+        # datatypes only. Every other hint passes straight through.
+        ld_type = _resolve_by_shape(d, type_hint)
 
         # get the LD class so we know what wrapped object to instantiate
         ld_cls = get_class(ld_type)

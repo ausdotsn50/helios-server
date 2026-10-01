@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<!--
+  Browser harness for the compiled booth bundle (milestone B6, and B1's Chrome leg).
+
+  This page loads the SAME bundle heliosbooth/vote.html loads, and nothing else.
+  It exists because the bundle cannot be exercised under Node: it carries jQuery,
+  which touches `document` at load time, so a Node check would have to fake a DOM
+  and would then be testing the fake rather than the artifact.
+
+  Driven headless by helios/tests_paillier.py. Everything is exposed on window so
+  the driver can call it through execute_script rather than scraping console logs.
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>booth bundle harness</title>
+  <script language="javascript" src="../../heliosbooth/js/20260907-helios-booth-compressed.js"></script>
+</head>
+<body>
+<script>
+// The booth seeds sjcl from server-provided randomness (vote.html:390) plus
+// entropy collectors (vote.html:426). Mirror that here.
+window.__seed = function() {
+  try {
+    var words = new Uint32Array(32);
+    window.crypto.getRandomValues(words);
+    sjcl.random.addEntropy(Array.from(words), 1024, 'crypto.getRandomValues');
+    sjcl.random.startCollectors();
+    return true;
+  } catch (e) {
+    return 'seed failed: ' + e;
+  }
+};
+
+// B1's Chrome leg: the same fixture Python and Node already agree on.
+window.__checkChallengeVectors = function(vectors) {
+  var results = [];
+  for (var i = 0; i < vectors.length; i++) {
+    var v = vectors[i];
+    var commitments = v.commitments.map(function(s) {
+      return BigInt.fromJSONObject(s);
+    });
+    var got;
+    try {
+      got = Paillier.disjunctive_challenge_generator(commitments).toJSONObject();
+    } catch (e) {
+      got = '<threw ' + e + '>';
+    }
+    results.push({label: v.label, ok: got === v.challenge,
+                  expected: v.challenge, got: got});
+  }
+  return results;
+};
+
+// B6: build a ballot through HELIOS.EncryptedAnswer, exactly as the booth does.
+window.__buildBallot = function(electionJSON, qNum, answer) {
+  try {
+    var election = HELIOS.Election.fromJSONString(electionJSON);
+    var t0 = performance.now();
+    var ea = new HELIOS.EncryptedAnswer(
+        election.questions[qNum], answer, election.public_key);
+    var t1 = performance.now();
+    var json = ea.toJSONObject(false);
+    return {
+      ok: true,
+      timing_ms: t1 - t0,
+      json: json,
+      scheme_marker: Object.keys(json.choices[0]).sort().join(','),
+      ciphertext_bytes: new TextEncoder().encode(
+          JSON.stringify(json.choices)).length,
+      proof_bytes: new TextEncoder().encode(
+          JSON.stringify([json.individual_proofs, json.overall_proof])).length
+    };
+  } catch (e) {
+    return {ok: false, error: '' + e, stack: '' + (e && e.stack)};
+  }
+};
+
+window.__loaded = (typeof HELIOS !== 'undefined' &&
+                   typeof Paillier !== 'undefined' &&
+                   typeof CRYPTO !== 'undefined');
+</script>
+<p id="status">booth bundle harness</p>
+</body>
+</html>

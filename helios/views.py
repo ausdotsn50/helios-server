@@ -28,7 +28,7 @@ from helios_auth.security import check_csrf, login_required, get_user, save_in_s
 from . import datatypes
 from . import forms
 from . import tasks
-from .crypto import algs, electionalgs, elgamal
+from .crypto import algs, electionalgs, elgamal, paillier
 from .crypto import utils as cryptoutils
 from .models import User, Election, CastVote, Voter, VoterFile, Trustee, AuditedBallot
 from .security import (election_view, election_admin,
@@ -48,6 +48,52 @@ ELGAMAL_PARAMS.g = 1488749222496318763428242153718604080130400801774349230448173
 
 # object ready for serialization
 ELGAMAL_PARAMS_LD_OBJECT = datatypes.LDObject.instantiate(ELGAMAL_PARAMS, datatype='legacy/EGParams')
+
+# Paillier has no fixed public parameters -- there is no analogue of the
+# hardcoded (p, q, g) above, because every keypair needs two fresh primes. So
+# the only parameter is the key size, chosen as 1024 bits per prime to give
+# |n| = 2048 and |n^2| = 4096, matching ElGamal's 2048-bit p.
+#
+# This asymmetry is architectural rather than algorithmic, and the manuscript
+# reports it as such: ElGamal keygen samples a secret exponent in a fixed group
+# (one exponentiation), while Paillier generates a fresh RSA-shaped modulus.
+PAILLIER_PARAMS = paillier.Paillier()
+PAILLIER_PARAMS.key_size = 1024
+
+# Which encryption function a given election's keys use -- standard, or one of
+# the two DJN §4.1 modes -- is decided PER ELECTION by
+# Election.paillier_djn41_mode, not here; see crypto_params_for below. Only the
+# key size is deployment-wide.
+
+
+CRYPTO_PARAMS = {
+  'elgamal': ELGAMAL_PARAMS,
+  'paillier': PAILLIER_PARAMS,
+}
+
+
+def crypto_params_for(election):
+  """
+  The cryptosystem an election's trustee keys should be generated in.
+
+  Built PER ELECTION rather than returned from a module-level singleton,
+  because the optimization ablations are properties of the election and are
+  stored on it. A process-wide setting could not be varied cell by cell, could
+  not be recovered from a stored election afterwards, and could be set on the
+  wrong process -- the runner imports this module too.
+  """
+  scheme = getattr(election, 'crypto_scheme', None) or 'elgamal'
+
+  if scheme == 'paillier':
+    return paillier.Paillier(
+      key_size=PAILLIER_PARAMS.key_size,
+      djn41_mode=getattr(election, 'paillier_djn41_mode', 'off'))
+
+  try:
+    return CRYPTO_PARAMS[scheme]
+  except KeyError:
+    raise Exception("unknown crypto_scheme %r on election %s"
+                    % (scheme, election.uuid))
 
 # single election server? Load the single electionfrom models import Election
 from django.conf import settings
@@ -215,7 +261,7 @@ def election_new(request):
         election_params['admin'] = user
         try:
           election = Election.objects.create(**election_params)
-          election.generate_trustee(ELGAMAL_PARAMS)
+          election.generate_trustee(crypto_params_for(election))
           return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(url_names.election.ELECTION_VIEW, args=[election.uuid]))
         except IntegrityError:
           error = "An election with short name %s already exists" % election_params['short_name']
@@ -397,6 +443,18 @@ def list_trustees_view(request, election):
   
 @election_admin(frozen=False)
 def new_trustee(request, election):
+  # Enforcement point 3 of PAILLIER_BUILD_SPEC.md §4.6. Together with
+  # trustee_upload_pk below, this is one of the two routes by which a second
+  # trustee can be added at all. new_trustee_helios is fine: it creates the
+  # single Helios trustee, which is the intended one.
+  if election.crypto_scheme == 'paillier':
+    raise PermissionDenied(
+      "Paillier elections support exactly one trustee. Trustee public keys "
+      "cannot be combined under Paillier -- each trustee would generate an "
+      "unrelated modulus, and there is no operation that combines them into a "
+      "joint public key. The multi-party counterpart is threshold Paillier, "
+      "which requires distributed key generation and is out of scope.")
+
   if request.method == "GET":
     return render_template(request, 'new_trustee', {'election' : election})
   else:
@@ -414,7 +472,7 @@ def new_trustee_helios(request, election):
   """
   Make Helios a trustee of the election
   """
-  election.generate_trustee(ELGAMAL_PARAMS)
+  election.generate_trustee(crypto_params_for(election))
   return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(url_names.election.ELECTION_TRUSTEES_VIEW, args=[election.uuid]))
   
 @election_admin(frozen=False)
@@ -599,6 +657,13 @@ def trustee_check_sk(request, election, trustee):
   
 @trustee_check
 def trustee_upload_pk(request, election, trustee):
+  # Enforcement point 3 of PAILLIER_BUILD_SPEC.md §4.6, second route.
+  if election.crypto_scheme == 'paillier':
+    raise PermissionDenied(
+      "Paillier elections support exactly one trustee, held by the Helios "
+      "server. A trustee-generated keypair cannot be combined into the "
+      "election public key under Paillier; see the trustee page for details.")
+
   if request.method == "POST":
     # get the public key and the hash, and add it
     public_key_and_proof = utils.from_json(request.POST['public_key_json'])
@@ -1182,6 +1247,11 @@ def one_election_copy(request, election):
     admin = election.admin,
     uuid = new_uuid,
     datatype = election.datatype,
+    # without this a copied Paillier election would silently become ElGamal,
+    # or would quietly change optimization level
+    crypto_scheme = election.crypto_scheme,
+    paillier_djn41_mode = election.paillier_djn41_mode,
+    paillier_use_crt_proofs = election.paillier_use_crt_proofs,
     short_name = new_short_name,
     name = "Copy of " + election.name,
     election_type = election.election_type,
@@ -1201,7 +1271,7 @@ def one_election_copy(request, election):
   )
   
 
-  new_election.generate_trustee(ELGAMAL_PARAMS)
+  new_election.generate_trustee(crypto_params_for(new_election))
   return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(url_names.election.ELECTION_VIEW, args=[new_election.uuid]))
 
 # changed from admin to view because 

@@ -142,7 +142,8 @@ HELIOS.Election.fromJSONObject = function(d) {
     el.questions = [];
   
   if (el.public_key) {
-    el.public_key = ElGamal.PublicKey.fromJSONObject(el.public_key);
+    // dispatch on the serialized shape: ElGamal carries y/p/g/q, Paillier n/g
+    el.public_key = CRYPTO.publicKeyFromJSONObject(el.public_key);
   } else {
     // a placeholder that will allow hashing;
     el.public_key = HELIOS.get_bogus_public_key();
@@ -191,22 +192,10 @@ UTILS.open_window_with_content = function(content, mime_type) {
 
 // generate an array of the first few plaintexts
 UTILS.generate_plaintexts = function(pk, min, max) {
-  var last_plaintext = BigInt.ONE;
-
-  // an array of plaintexts
-  var plaintexts = [];
-  
-  if (min == null)
-    min = 0;
-  
-  // questions with more than one possible answer, add to the array.
-  for (var i=0; i<=max; i++) {
-    if (i >= min)
-      plaintexts.push(new ElGamal.Plaintext(last_plaintext, pk, false));
-    last_plaintext = last_plaintext.multiply(pk.g).mod(pk.p);
-  }
-  
-  return plaintexts;
+  // Delegated to the public key: ElGamal builds g^0, g^1, ... because it
+  // cannot encrypt zero, while Paillier uses the integers themselves.
+  // See js/jscrypto/scheme_adapters.js.
+  return pk.generatePlaintexts(min, max);
 }
 
 
@@ -270,15 +259,15 @@ HELIOS.EncryptedAnswer = Class.extend({
 
       // generate randomness?
       if (generate_new_randomness) {
-        randomness[i] = Random.getRandomInteger(pk.q);        
+        randomness[i] = pk.randomRandomness();
       }
 
-      choices[i] = ElGamal.encrypt(pk, zero_one_plaintexts[plaintext_index], randomness[i]);
+      choices[i] = pk.encrypt(zero_one_plaintexts[plaintext_index], randomness[i]);
       
       // generate proof
       if (generate_new_randomness) {
         // generate proof that this ciphertext is a 0 or a 1
-        individual_proofs[i] = choices[i].generateDisjunctiveProof(zero_one_plaintexts, plaintext_index, randomness[i], ElGamal.disjunctive_challenge_generator);        
+        individual_proofs[i] = choices[i].generateDisjunctiveProof(zero_one_plaintexts, plaintext_index, randomness[i], pk.disjunctiveChallengeGenerator());
       }
       
       if (progress)
@@ -294,7 +283,7 @@ HELIOS.EncryptedAnswer = Class.extend({
       var rand_sum = randomness[0];
       for (var i=1; i<question.answers.length; i++) {
         hom_sum = hom_sum.multiply(choices[i]);
-        rand_sum = rand_sum.add(randomness[i]).mod(pk.q);
+        rand_sum = pk.combineRandomness(rand_sum, randomness[i]);
       }
     
       // prove that the sum is 0 or 1 (can be "blank vote" for this answer)
@@ -306,7 +295,7 @@ HELIOS.EncryptedAnswer = Class.extend({
       if (question.min)
         overall_plaintext_index -= question.min;
       
-      overall_proof = hom_sum.generateDisjunctiveProof(plaintexts, overall_plaintext_index, rand_sum, ElGamal.disjunctive_challenge_generator);
+      overall_proof = hom_sum.generateDisjunctiveProof(plaintexts, overall_plaintext_index, rand_sum, pk.disjunctiveChallengeGenerator());
 
       if (progress) {
         for (var i=0; i<question.max; i++)
@@ -384,14 +373,14 @@ HELIOS.EncryptedAnswer = Class.extend({
 HELIOS.EncryptedAnswer.fromJSONObject = function(d, election) {
   var ea = new HELIOS.EncryptedAnswer();
   ea.choices = _(d.choices).map(function(choice) {
-    return ElGamal.Ciphertext.fromJSONObject(choice, election.public_key);
+    return election.public_key.ciphertextFromJSONObject(choice);
   });
   
   ea.individual_proofs = _(d.individual_proofs).map(function (p) {
-    return ElGamal.DisjunctiveProof.fromJSONObject(p);
+    return election.public_key.disjunctiveProofFromJSONObject(p);
   });
   
-  ea.overall_proof = ElGamal.DisjunctiveProof.fromJSONObject(d.overall_proof);
+  ea.overall_proof = election.public_key.disjunctiveProofFromJSONObject(d.overall_proof);
   
   // possibly load randomness and plaintext
   if (d.randomness) {
@@ -496,7 +485,7 @@ HELIOS.EncryptedVote = Class.extend({
 
         // go through each individual proof
         _(enc_answer.choices).each(function(choice, choice_num) {
-          var result = choice.verifyDisjunctiveProof(zero_or_one, enc_answer.individual_proofs[choice_num], ElGamal.disjunctive_challenge_generator);
+          var result = choice.verifyDisjunctiveProof(zero_or_one, enc_answer.individual_proofs[choice_num], pk.disjunctiveChallengeGenerator());
           outcome_callback(ea_num, choice_num, result, choice);
           
           VALID_P = VALID_P && result;
@@ -511,7 +500,7 @@ HELIOS.EncryptedVote = Class.extend({
           var plaintexts = UTILS.generate_plaintexts(pk, self.election.questions[ea_num].min, self.election.questions[ea_num].max);
         
           // check the proof on the overall product
-          var overall_check = overall_result.verifyDisjunctiveProof(plaintexts, enc_answer.overall_proof, ElGamal.disjunctive_challenge_generator);
+          var overall_check = overall_result.verifyDisjunctiveProof(plaintexts, enc_answer.overall_proof, pk.disjunctiveChallengeGenerator());
           outcome_callback(ea_num, null, overall_check, null);
           VALID_P = VALID_P && overall_check;
         } else {
@@ -580,7 +569,7 @@ HELIOS.Tally.fromJSONObject = function(d, public_key) {
   
   var raw_tally = _(d['tally']).map(function(one_q) {
     return _(one_q).map(function(one_a) {
-      var new_val= ElGamal.Ciphertext.fromJSONObject(one_a, public_key);
+      var new_val= public_key.ciphertextFromJSONObject(one_a);
       return new_val;
     });
   });
@@ -622,14 +611,22 @@ HELIOS.Trustee = Class.extend({
     return {
       'decryption_factors' : HELIOS.jsonify_list_of_lists(this.decryption_factors),
       'decryption_proofs' : HELIOS.jsonify_list_of_list(this.decryption_proofs),
-      'email' : this.email, 'name' : this.name, 'pok' : this.pok.toJSONObject(), 'public_key' : this.public_key.toJSONObject()
+      'email' : this.email, 'name' : this.name, 'pok' : (this.pok == null ? null : this.pok.toJSONObject()), 'public_key' : this.public_key.toJSONObject()
     };
   }
 });
 
 HELIOS.Trustee.fromJSONObject = function(d) {
+  var pk = CRYPTO.publicKeyFromJSONObject(d.public_key);
+
+  // The Paillier arm generates no trustee proof of knowledge of the secret key
+  // -- its analogue is a proof of knowledge of the factorization, which is real
+  // work with no measurement payoff -- so pok is stored as null. An empty proof
+  // object is deliberately NOT fabricated: it would verify vacuously.
+  var pok = (d.pok == null) ? null : ElGamal.DLogProof.fromJSONObject(d.pok);
+
   return new HELIOS.Trustee(d.uuid,
-    ElGamal.PublicKey.fromJSONObject(d.public_key), d.public_key_hash, ElGamal.DLogProof.fromJSONObject(d.pok),
+    pk, d.public_key_hash, pok,
     HELIOS.dejsonify_list_of_lists(d.decryption_factors, BigInt.fromJSONObject),
-    HELIOS.dejsonify_list_of_lists(d.decryption_proofs, ElGamal.Proof.fromJSONObject));
+    HELIOS.dejsonify_list_of_lists(d.decryption_proofs, pk.proofFromJSONObject.bind(pk)));
 };
