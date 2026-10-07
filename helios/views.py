@@ -50,21 +50,9 @@ ELGAMAL_PARAMS.g = 1488749222496318763428242153718604080130400801774349230448173
 ELGAMAL_PARAMS_LD_OBJECT = datatypes.LDObject.instantiate(ELGAMAL_PARAMS, datatype='legacy/EGParams')
 
 # Paillier has no fixed public parameters -- there is no analogue of the
-# hardcoded (p, q, g) above, because every keypair needs two fresh primes. So
-# the only parameter is the key size, chosen as 1024 bits per prime to give
-# |n| = 2048 and |n^2| = 4096, matching ElGamal's 2048-bit p.
-#
-# This asymmetry is architectural rather than algorithmic, and the manuscript
-# reports it as such: ElGamal keygen samples a secret exponent in a fixed group
-# (one exponentiation), while Paillier generates a fresh RSA-shaped modulus.
+# hardcoded (p, q, g) above, because every keypair needs two fresh primes.
 PAILLIER_PARAMS = paillier.Paillier()
 PAILLIER_PARAMS.key_size = 1024
-
-# Which encryption function a given election's keys use -- standard, or one of
-# the two DJN §4.1 modes -- is decided PER ELECTION by
-# Election.paillier_djn41_mode, not here; see crypto_params_for below. Only the
-# key size is deployment-wide.
-
 
 CRYPTO_PARAMS = {
   'elgamal': ELGAMAL_PARAMS,
@@ -74,13 +62,7 @@ CRYPTO_PARAMS = {
 
 def crypto_params_for(election):
   """
-  The cryptosystem an election's trustee keys should be generated in.
-
-  Built PER ELECTION rather than returned from a module-level singleton,
-  because the optimization ablations are properties of the election and are
-  stored on it. A process-wide setting could not be varied cell by cell, could
-  not be recovered from a stored election afterwards, and could be set on the
-  wrong process -- the runner imports this module too.
+  The cryptosystem an election's trustee keys should be generated in. Built per election.
   """
   scheme = getattr(election, 'crypto_scheme', None) or 'elgamal'
 

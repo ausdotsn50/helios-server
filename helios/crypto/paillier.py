@@ -136,7 +136,7 @@ _SIEVE_BOUND = 1 << 12
 _SIEVE_PRIMES = _odd_primes_up_to(_SIEVE_BOUND)
 _SIEVE_PRODUCT = math.prod(_SIEVE_PRIMES)
 
-
+# Replaced pycryptodome's safe_prime function implementation
 def generate_safe_prime(bits):
   """
   A probable safe prime p = 2p'+1 of exactly `bits` bits, above
@@ -435,35 +435,18 @@ class PaillierKeyPair:
 
   def generate(self, key_size=DEFAULT_KEY_SIZE, djn41_mode='off'):
     """
-    Build a keypair (build spec §2.1).
+    Build a keypair
 
         p, q  <- distinct random primes, exactly `key_size` bits each
         n     =  p*q
         g     =  1 + n
         lambda=  lcm(p-1, q-1)
         mu    =  lambda^-1 mod n
-
-    mu reduces to a modular inverse rather than the general
-    (L(g^lambda mod n^2))^-1 because g = 1+n gives g^lambda = 1 + lambda*n
-    (mod n^2), hence L(g^lambda) = lambda. Derived, not quoted -- test 13
-    computes it both ways and asserts equality.
-
-    getStrongPrime rather than getPrime: it additionally ensures p-1 and p+1
-    carry a large prime factor. That is the standard choice for an RSA-shaped
-    modulus, and since key generation is one of the reported metrics the choice
-    is recorded here rather than left implicit -- it makes keygen measurably
-    slower than naive prime search would be, and comparably safer.
-
-    Under either DJN §4.1 mode the primes are SAFE primes instead, as §4.1
-    requires (see check_djn41_primes), from generate_safe_prime's sieved
-    search. Safe primes are rare, so this is still far slower than
-    getStrongPrime: at 1024 bits, a median of 12 s per prime on the
-    development machine, with a long tail. That, not h, dominates DJN key
-    generation time.
     """
     if djn41_mode == 'off':
       def new_prime():
-        return number.getStrongPrime(key_size)
+        # Return a random strong N-bit prime number. In this context, p is a strong prime if p-1 and p+1 have at least one large prime factor.
+        return number.getStrongPrime(key_size) # From pycryptodome library
     else:
       def new_prime():
         return generate_safe_prime(key_size)
@@ -484,6 +467,7 @@ class PaillierKeyPair:
     if djn41_mode != 'off':
       check_djn41_primes(p, q)
 
+    # Proceed here if DJN off
     n = p * q
 
     self.pk.n = n
@@ -506,7 +490,7 @@ class PaillierKeyPair:
     self.sk.p = p
     self.sk.q = q
     self.sk.lambda_ = math.lcm(p - 1, q - 1)
-    self.sk.mu = number.inverse(self.sk.lambda_, n)
+    self.sk.mu = number.inverse(self.sk.lambda_, n) # yptodome: The inverse of u mod v.
     self.sk.public_key = self.pk
 
     if p == q:
@@ -539,20 +523,14 @@ class PaillierPublicKey:
   # See helios/datatypes/__init__.py.
   datatype = 'paillier/PublicKey'
 
-  # Does decryption pass through a discrete-log table? No: single-trustee
-  # Paillier decryption yields the plaintext itself (see tally_decoder). Read
-  # by Tally.decrypt_from_factors to decide what it times; the same meaning as
-  # has_dlog in the workload harness's schemes.py.
+  # Shared tally code with ElGamal (specify)
   has_dlog = False
 
   def __init__(self, n=None, g=None, h=None, hn=None, djn41_mode='off'):
     self.n = n
     self.g = g
 
-    # DJN §4.1 parameters, None on a standard key. The mode travels WITH the
-    # key because the booth sees only the public key, and a 'short' key and a
-    # 'long' key are otherwise indistinguishable: same h, same hn, and only the
-    # exponent range differs.
+    # DJN mode parameters
     self.djn41_mode = djn41_mode
     self.h = h        # -x^2 mod n
     self.hn = hn      # h^n mod n^2

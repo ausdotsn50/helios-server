@@ -84,7 +84,7 @@ class Election(HeliosModel):
   crypto_scheme = models.CharField(max_length=20, null=False, default='elgamal',
                                    choices=CRYPTO_SCHEMES)
 
-  # --- optimization ablations (masterplan §6.3) ----------------------------
+  # --- optimization ablations ----------------------------
   #
   # These are PER-ELECTION rather than per-deployment, and stored rather than
   # read from settings, for the same reason crypto_scheme is: an experiment

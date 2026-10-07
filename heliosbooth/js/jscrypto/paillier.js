@@ -4,11 +4,6 @@
  * Browser twin of helios/crypto/paillier.py. Structured as a mirror of
  * elgamal.js, which is a proven template for this exact shape.
  *
- * Not mirrored: ElGamal.Params, ElGamal.SecretKey and ElGamal.DLogProof.
- * Paillier has no shared group parameters (the key is n itself), key
- * generation and decryption run only on the server, and trustees publish no
- * proof of knowledge of the secret key.
- *
  * BIGNUM: this file uses Helios's vendored jsbn via the BigInt wrapper in
  * bigint.js, and MUST NOT use native BigInt. Native BigInt would make Paillier
  * faster for reasons that have nothing to do with Paillier and would invalidate
@@ -20,29 +15,13 @@
 
 var Paillier = {};
 
-
-// ---------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
-
 Paillier.CHALLENGE_BITS = 160;
 Paillier.CHALLENGE_MODULUS = BigInt.ONE.shiftLeft(160);
-
 Paillier.DJN41_MODES = ['off', 'short', 'long'];
-
-// How far past a single exponent the fixed-base tables reach. Mirrors
-// TABLE_HEADROOM_BITS in helios/crypto/paillier.py: the overall proof's witness
-// raises h to the SUM of a question's exponents.
 Paillier.TABLE_HEADROOM_BITS = 16;
 
-
-// ---------------------------------------------------------------------------
-// Public key
-// ---------------------------------------------------------------------------
 Paillier.PublicKey = Class.extend({
-  // h, hn and djn41_mode are the DJN 4.1 parameters, absent on a standard key.
-  // The mode travels with the key because a 'short' key and a 'long' key are
-  // otherwise identical, and the booth sees nothing but the key.
   init: function(n, g, h, hn, djn41_mode) {
     this.n = n;
     this.g = g;          // == n+1, carried explicitly to mirror EGPublicKey
@@ -64,15 +43,6 @@ Paillier.PublicKey = Class.extend({
   },
 
   // Enc(m, v) = (1 + m*n) * v^n mod n^2
-  //
-  // The message component is ONE MULTIPLICATION, never an exponentiation:
-  // (1+n)^m = 1 + mn (mod n^2), because every binomial term from the third on
-  // carries n^2. Only v^n costs. That is no saving over ElGamal, which never
-  // exponentiates g^m per encryption either: generatePlaintexts builds g^0,
-  // g^1, ... by a running product and ElGamal.encrypt multiplies the chosen one
-  // in. The real gap is the blinding: here one modPow with a 4096-bit modulus
-  // and a 2048-bit exponent; in ElGamal two with a 2048-bit modulus and a
-  // 256-bit exponent (g^r and y^r, r from Z_q).
   encrypt: function(plaintext, r) {
     if (r == null) {
       r = this.randomRandomness();
@@ -100,7 +70,7 @@ Paillier.PublicKey = Class.extend({
   // where k = |n|, and n // 2 under 'long'.
   exponentBound: function() {
     if (this.djn41_mode == 'short')
-      return BigInt.ONE.shiftLeft(Math.ceil(this.n.bitLength() / 2));
+      return BigInt.ONE.shiftLeft(Math.ceil(this.n.bitLength() / 2)); // 1 shift left in k/2 places
     if (this.djn41_mode == 'long')
       return this.n.shiftRight(1);
     return null;
