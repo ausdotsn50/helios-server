@@ -102,7 +102,7 @@ def _resolve_by_shape(d, ld_type):
         return ld_type
 
     if ld_type == 'legacy/EGPublicKey':
-        # A standard Paillier key is {n, g}, and a DJN §4.1 key adds
+        # A standard Paillier key is {n, g}, and a DJN 4.1 key adds
         # {h, hn, djn41_mode}. Neither carries 'y', so both route here.
         if 'y' not in d and 'n' in d:
             return 'paillier/PublicKey'
@@ -122,7 +122,7 @@ def _resolve_by_shape(d, ld_type):
             return 'paillier/ZKProof'
 
     # legacy/DLogProof is not dispatched: the Paillier arm generates no trustee
-    # proof of knowledge of the secret key (build spec §4.4), so pok is stored
+    # proof of knowledge of the secret key (build spec 4.4), so pok is stored
     # as null and never reaches a shape decision.
 
     return ld_type

@@ -72,7 +72,7 @@ def _eg_random_randomness(self):
 
   Note the exponent is drawn from Z_q with q of 256 bits, not from Z_p. That
   short exponent in a 2048-bit group is a large structural advantage for
-  ElGamal and the single biggest term in the §5.1 cost model.
+  ElGamal and the single biggest term in the 5.1 cost model.
   """
   return algs.random.mpz_lt(self.q)
 

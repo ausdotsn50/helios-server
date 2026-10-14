@@ -1,4 +1,4 @@
-# Generated manually: the DJN §4.1 setting becomes a three-way mode.
+# Generated manually: the DJN 4.1 setting becomes a three-way mode.
 #
 # paillier_use_djn41 (a boolean) is replaced by paillier_djn41_mode ('off',
 # 'short' or 'long'). Existing elections keep what they meant: True could only
@@ -39,7 +39,7 @@ class Migration(migrations.Migration):
     migrations.AddField(
       model_name='election',
       name='paillier_djn41_mode',
-      field=models.CharField(choices=[('off', 'Off (standard Paillier)'), ('short', 'DJN §4.1, short exponent'), ('long', 'DJN §4.1, long exponent')], default='off', max_length=10),
+      field=models.CharField(choices=[('off', 'Off (standard Paillier)'), ('short', 'DJN 4.1, short exponent'), ('long', 'DJN 4.1, long exponent')], default='off', max_length=10),
     ),
     migrations.RunPython(boolean_to_mode, mode_to_boolean),
     migrations.RemoveField(

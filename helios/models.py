@@ -92,20 +92,20 @@ class Election(HeliosModel):
   # fact against what the election actually did. A process-wide setting is
   # invisible to the results, cannot be verified from a stored election, and
   # can be set on the wrong process -- all three of which defeat the guard in
-  # PAILLIER_BUILD_SPEC.md §8.1, that a run must not be able to claim
+  # PAILLIER_BUILD_SPEC.md 8.1, that a run must not be able to claim
   # something it did not execute.
   #
   # Both are ignored entirely by ElGamal elections.
 
-  # DJN §4.1 alternative encryption function, hn^a with a fixed base instead of
+  # DJN 4.1 alternative encryption function, hn^a with a fixed base instead of
   # v^n (see helios/crypto/paillier.py). 'short' draws a ceil(|n|/2)-bit
   # exponent and costs an assumption beyond decisional composite residuosity;
   # 'long' draws the exponent from [0, n/2) and costs none. Both are ablations,
   # so standard Paillier ('off') is the default.
   PAILLIER_DJN41_MODES = (
     ('off', 'Off (standard Paillier)'),
-    ('short', 'DJN §4.1, short exponent'),
-    ('long', 'DJN §4.1, long exponent'),
+    ('short', 'DJN 4.1, short exponent'),
+    ('long', 'DJN 4.1, long exponent'),
     )
 
   paillier_djn41_mode = models.CharField(max_length=10, null=False,
@@ -114,7 +114,7 @@ class Election(HeliosModel):
 
   # CRT acceleration of the DECRYPTION PROOF (decryption itself is always
   # CRT-accelerated). Worth ~1.72x, and available to the trustee by definition
-  # since only the trustee holds the factorization -- so unlike 'short' DJN §4.1
+  # since only the trustee holds the factorization -- so unlike 'short' DJN 4.1
   # it costs no additional assumption and is ON by default. Switchable so the
   # ablation can measure what it is worth rather than assert it.
   paillier_use_crt_proofs = models.BooleanField(default=True, null=False)
@@ -511,7 +511,7 @@ class Election(HeliosModel):
     # moduli n_i, and no operation combines RSA-shaped moduli into a joint
     # public key. Paillier's multi-party counterpart is the threshold variant,
     # which needs genuine distributed key generation -- out of scope.
-    # See PAILLIER_BUILD_SPEC.md §4.6.
+    # See PAILLIER_BUILD_SPEC.md 4.6.
     if self.crypto_scheme == 'paillier' and len(trustees) > 1:
       issues.append({
           'type': 'trustees',
@@ -789,7 +789,7 @@ class Election(HeliosModel):
     # generator is None, because Paillier generates no trustee proof of
     # knowledge of the secret key -- prove_sk returns None and pok persists as
     # null. An empty proof object is deliberately not fabricated: it would
-    # verify vacuously. See PAILLIER_BUILD_SPEC.md §4.4.
+    # verify vacuously. See PAILLIER_BUILD_SPEC.md 4.4.
     trustee.public_key_hash = datatypes.LDObject.instantiate(trustee.public_key, datatype=params.public_key_datatype).hash
 
     if params.dlog_challenge_generator is None:

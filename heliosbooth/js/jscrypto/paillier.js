@@ -542,7 +542,7 @@ Paillier.fixedBasePow = function(base, table, exponent, modulus) {
 
 
 // ---------------------------------------------------------------------------
-// Challenge generation (build spec §2.9)
+// Challenge generation (build spec 2.9)
 // ---------------------------------------------------------------------------
 //
 // Byte-exact twin of paillier_disjunctive_challenge_generator in

@@ -26,8 +26,8 @@ TWO THINGS HERE ARE NOT OPTIONAL:
    exception, and TextEncoder turns that into a plausible-looking 9 bytes.
 
 FIELD NAMING: the secret key's Carmichael function is `lambda_` on the object
-AND `lambda_` in the JSON. The masterplan's illustrative JSON (§4.10) shows
-"lambda", but build spec §5.2 requires picking one spelling and never mixing;
+AND `lambda_` in the JSON. The masterplan's illustrative JSON (4.10) shows
+"lambda", but build spec 5.2 requires picking one spelling and never mixing;
 `lambda_` is chosen because it avoids the Python keyword without needing a
 process_value_in/out override. The secret key never leaves the server -- it is
 not sent to the booth or to any verifier -- so the spelling has no interop
@@ -45,14 +45,14 @@ class PaillierObject(LDObject):
 
 class PublicKey(PaillierObject):
     """
-    A Paillier public key: {n, g}, plus {h, hn, djn41_mode} under DJN §4.1.
+    A Paillier public key: {n, g}, plus {h, hn, djn41_mode} under DJN 4.1.
 
-    The §4.1 fields are emitted ONLY when the key is in a DJN mode, rather than
+    The 4.1 fields are emitted ONLY when the key is in a DJN mode, rather than
     being declared in FIELDS and serialized as nulls on a standard key. Two
     reasons:
 
     1. A standard key's serialization is then byte-for-byte what it was before
-       §4.1 existed, so stored elections and the B8 ballot-size canary are
+       4.1 existed, so stored elections and the B8 ballot-size canary are
        unaffected.
     2. The mode travels with the key. The booth sees only the public key, and
        a 'short' key and a 'long' key differ in nothing else, so a key that

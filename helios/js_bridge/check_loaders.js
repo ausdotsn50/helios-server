@@ -5,7 +5,7 @@
  *
  * Two things are checked, and they are different questions.
  *
- * 1. LOADER PARITY. The booth has two loaders (build spec §1.6): vote.html
+ * 1. LOADER PARITY. The booth has two loaders (build spec 1.6): vote.html
  *    loads a compiled bundle, boothworker-single.js importScripts the
  *    individual files. The harness measures the bundle; a real voter uses the
  *    worker. Adding paillier.js to one and not the other fails silently, so

@@ -11,7 +11,7 @@ compatible. Mirroring that split would produce a Paillier module that either the
 datatypes layer never instantiates or homomorphic.py cannot call. One module,
 pointed at by the new datatypes, avoids the whole problem.
 
-Parameters (build spec §2): k = 1024 bits per prime, so |n| = 2048 and
+Parameters (build spec 2): k = 1024 bits per prime, so |n| = 2048 and
 |n^2| = 4096, matching ElGamal's 2048-bit p. Challenge width t = 160, matching
 Helios's existing SHA-1 generator. L(x) = (x-1)/n.
 """
@@ -35,7 +35,7 @@ MIN_MODULUS_BITS = 2048
 
 
 # ---------------------------------------------------------------------------
-# DJN §4.1 — the alternative encryption function
+# DJN 4.1 — the alternative encryption function
 # ---------------------------------------------------------------------------
 #
 # Standard Paillier encrypts with  Enc(m, v) = (1 + m*n) * v^n mod n^2,  and the
@@ -44,7 +44,7 @@ MIN_MODULUS_BITS = 2048
 # is also what makes the message space Z_n. The exponent is not a tunable
 # security parameter, and it cannot be reduced (n < lambda(n^2) = n*lambda(n)).
 #
-# DJN §4.1 buys a shorter exponent by fixing a public base. As the paper
+# DJN 4.1 buys a shorter exponent by fixing a public base. As the paper
 # specifies it:
 #
 #   - n = pq with p = q = 3 (mod 4), gcd(p-1, q-1) = 2, and every odd prime
@@ -78,13 +78,13 @@ MIN_MODULUS_BITS = 2048
 # simulator, verifier, serialization and ballot size. Only the ciphertext's
 # blinding factor is produced differently.
 #
-# COST (DJN §4.2): with precomputed powers of the fixed base, an exponent of
+# COST (DJN 4.2): with precomputed powers of the fixed base, an exponent of
 # b bits costs about b/2 modular multiplications and no squarings -- k/4 for
 # 'short', where v^n costs about 1.2k multiplications and squarings mod n^2.
 # The tables are hn^(2^i) mod n^2 and h^(2^i) mod n, built lazily on first
 # use and cached on the public key; see PaillierPublicKey.fixed_base_tables.
 #
-# Cite: Damgard, Jurik, Nielsen (2010) §4.1, §4.2.
+# Cite: Damgard, Jurik, Nielsen (2010) 4.1, 4.2.
 
 DJN41_MODES = ('off', 'short', 'long')
 
@@ -97,24 +97,24 @@ TABLE_HEADROOM_BITS = 16
 
 def check_djn41_primes(p, q):
   """
-  Raise ValueError unless (p, q) meet DJN §4.1's conditions on the modulus.
+  Raise ValueError unless (p, q) meet DJN 4.1's conditions on the modulus.
 
   Checked directly rather than inferred: p = q = 3 (mod 4), gcd(p-1, q-1) = 2,
   and p, q, (p-1)/2 and (q-1)/2 all prime -- so the only odd prime factor of
   p-1 is (p-1)/2, which is as large as it can be.
   """
   if p == q:
-    raise ValueError("DJN §4.1: p and q must be distinct")
+    raise ValueError("DJN 4.1: p and q must be distinct")
   for name, prime in (('p', p), ('q', q)):
     if prime % 4 != 3:
-      raise ValueError("DJN §4.1: %s must be 3 mod 4" % name)
+      raise ValueError("DJN 4.1: %s must be 3 mod 4" % name)
     if not number.isPrime(prime):
-      raise ValueError("DJN §4.1: %s is not prime" % name)
+      raise ValueError("DJN 4.1: %s is not prime" % name)
     if not number.isPrime((prime - 1) // 2):
-      raise ValueError("DJN §4.1: %s is not a safe prime -- (%s-1)/2 is not "
+      raise ValueError("DJN 4.1: %s is not a safe prime -- (%s-1)/2 is not "
                        "prime" % (name, name))
   if math.gcd(p - 1, q - 1) != 2:
-    raise ValueError("DJN §4.1: gcd(p-1, q-1) must be 2")
+    raise ValueError("DJN 4.1: gcd(p-1, q-1) must be 2")
 
 
 def _odd_primes_up_to(bound):
@@ -209,7 +209,7 @@ def _generate_safe_prime(bits, sieve_bound, sieve_product):
 
 def djn41_fields_from_dict(d):
   """
-  The DJN §4.1 fields of a serialized public key, as constructor arguments.
+  The DJN 4.1 fields of a serialized public key, as constructor arguments.
 
   A standard key carries none of them; a DJN key carries h, hn and djn41_mode.
   Shared by PaillierPublicKey.from_dict and the paillier/PublicKey datatype, so
@@ -225,18 +225,18 @@ def djn41_fields_from_dict(d):
 
   if mode == 'off':
     if any(d.get(f) is not None for f in ('h', 'hn', 'g_prime')):
-      raise Exception("DJN §4.1 parameters without a djn41_mode: this is the "
+      raise Exception("DJN 4.1 parameters without a djn41_mode: this is the "
                       "retired (h, g_prime) key format, which is no longer "
                       "supported")
     return {'djn41_mode': 'off', 'h': None, 'hn': None}
 
   if d.get('h') is None or d.get('hn') is None:
-    raise Exception("a %r DJN §4.1 key must carry h and hn" % mode)
+    raise Exception("a %r DJN 4.1 key must carry h and hn" % mode)
   return {'djn41_mode': mode, 'h': int(d['h']), 'hn': int(d['hn'])}
 
 
 # ---------------------------------------------------------------------------
-# Fixed-base exponentiation (DJN §4.2)
+# Fixed-base exponentiation (DJN 4.2)
 # ---------------------------------------------------------------------------
 
 def _fixed_base_table(base, modulus, bits):
@@ -315,7 +315,7 @@ def random_z_star_n(n, strong_random=random):
 
 
 # ---------------------------------------------------------------------------
-# Challenge generation (build spec §2.9)
+# Challenge generation (build spec 2.9)
 # ---------------------------------------------------------------------------
 #
 # This is where cross-language builds fail silently, so it is specified once,
@@ -338,7 +338,7 @@ def random_z_star_n(n, strong_random=random):
 # of n, which at 1024-bit primes leaves ~864 bits of margin. Reusing Helios's
 # SHA-1 generator therefore satisfies the soundness bound AND holds the hash
 # function constant across both arms, removing a hashing-cost difference from
-# the comparison. (This supersedes IMPLEMENTATION_SPEC.md §2.2.2, which
+# the comparison. (This supersedes IMPLEMENTATION_SPEC.md 2.2.2, which
 # specified SHA-256; masterplan decision 6.)
 
 CHALLENGE_BITS = 160
@@ -363,7 +363,7 @@ def paillier_disjunctive_challenge_generator(commitments):
 
 def paillier_fiatshamir_challenge_generator(commitment):
   """
-  Single-commitment case, used by the proof of correct decryption (§2.8).
+  Single-commitment case, used by the proof of correct decryption (2.8).
 
   Wraps the disjunctive generator with a one-element list, exactly as
   EG_fiatshamir_challenge_generator wraps EG_disjunctive_challenge_generator.
@@ -372,7 +372,7 @@ def paillier_fiatshamir_challenge_generator(commitment):
 
 
 # ---------------------------------------------------------------------------
-# Cryptosystem (build spec §2.1, §4.1)
+# Cryptosystem (build spec 2.1, 4.1)
 # ---------------------------------------------------------------------------
 
 class Paillier:
@@ -402,7 +402,7 @@ class Paillier:
                        % (DJN41_MODES, djn41_mode))
     self.djn41_mode = djn41_mode
 
-  # --- surface models.generate_trustee reads (build spec §4.3) -------------
+  # --- surface models.generate_trustee reads (build spec 4.3) -------------
 
   # Which datatype a trustee public key of this scheme serializes as.
   public_key_datatype = 'paillier/PublicKey'
@@ -451,6 +451,7 @@ class PaillierKeyPair:
       def new_prime():
         return generate_safe_prime(key_size)
 
+    # getStrongPrime ensures equal bit length, passes gcd check
     p = new_prime()
     q = new_prime()
     while q == p:
@@ -475,7 +476,7 @@ class PaillierKeyPair:
     self.pk.djn41_mode = djn41_mode
 
     if djn41_mode != 'off':
-      # DJN §4.1's fixed base, h = -x^2 mod n. -1 is a non-square of Jacobi
+      # DJN 4.1's fixed base, h = -x^2 mod n. -1 is a non-square of Jacobi
       # symbol +1 because p = q = 3 (mod 4), so h has Jacobi symbol +1 and,
       # except with negligible probability, generates that whole group.
       # Encryption raises hn = h^n mod n^2; the voter raises h itself to get
@@ -493,11 +494,6 @@ class PaillierKeyPair:
     self.sk.mu = number.inverse(self.sk.lambda_, n) # yptodome: The inverse of u mod v.
     self.sk.public_key = self.pk
 
-    if p == q:
-      raise Exception("p and q must be distinct")
-    if math.gcd(self.sk.lambda_, n) != 1:
-      raise Exception("gcd(lambda, n) != 1")
-
     return self
 
   @classmethod
@@ -506,9 +502,9 @@ class PaillierKeyPair:
     Construct from fixed primes.
 
     Used by the test suite -- for small keys that keep the suite fast, for the
-    fixed safe primes the DJN §4.1 tests share, and for the deterministic
+    fixed safe primes the DJN 4.1 tests share, and for the deterministic
     (p, q, m, v) vectors checked against the external oracle in test 14. In
-    either DJN mode the primes must meet §4.1's conditions, and ordinary primes
+    either DJN mode the primes must meet 4.1's conditions, and ordinary primes
     raise ValueError (see check_djn41_primes).
     """
     kp = cls()
@@ -545,13 +541,13 @@ class PaillierPublicKey:
 
   @property
   def uses_djn_41(self):
-    """True under either DJN §4.1 mode, 'short' or 'long'."""
+    """True under either DJN 4.1 mode, 'short' or 'long'."""
     return self.djn41_mode != 'off'
 
   @property
   def exponent_bound(self):
     """
-    Exclusive upper bound on one DJN §4.1 encryption exponent:
+    Exclusive upper bound on one DJN 4.1 encryption exponent:
     2^ceil(k/2) under 'short', where k = |n|, and n // 2 under 'long'. None on
     a standard key, whose randomness is a base rather than an exponent.
     """
@@ -565,7 +561,7 @@ class PaillierPublicKey:
     """
     (T_hn, T_h), with T_hn[i] = hn^(2^i) mod n^2 and T_h[i] = h^(2^i) mod n.
 
-    DJN §4.2's cost claim assumes precomputed powers of the fixed base. These
+    DJN 4.2's cost claim assumes precomputed powers of the fixed base. These
     are built on first use and cached on this key object, then shared by every
     encryption and every witness under it.
 
@@ -578,7 +574,7 @@ class PaillierPublicKey:
     hn is replaced rebuilds its tables rather than silently using the old base.
     """
     if not self.uses_djn_41:
-      raise Exception("fixed-base tables exist only under DJN §4.1")
+      raise Exception("fixed-base tables exist only under DJN 4.1")
 
     params = (self.djn41_mode, self.n, self.h, self.hn)
     if self._tables is None or self._tables[0] != params:
@@ -598,7 +594,7 @@ class PaillierPublicKey:
     return _fixed_base_pow(self.h, self.fixed_base_tables()[1], exponent,
                            self.n)
 
-  # --- encryption (build spec §2.3) ---------------------------------------
+  # --- encryption (build spec 2.3) ---------------------------------------
 
   def encrypt_with_r(self, plaintext, r, encode_message=False):
     """
@@ -634,7 +630,7 @@ class PaillierPublicKey:
     n, n2 = self.n, self.n2
 
     if self.uses_djn_41:
-      # DJN §4.1: r is an EXPONENT against the fixed base hn, not a base raised
+      # DJN 4.1: r is an EXPONENT against the fixed base hn, not a base raised
       # to n. From the fixed-base table that is one multiplication mod n^2 per
       # set bit of r, and no squarings.
       blinding = self._hn_pow(r)
@@ -648,7 +644,7 @@ class PaillierPublicKey:
     Encrypt and hand back the randomness, which the proofs need as witness.
 
     Draws through random_randomness() rather than sampling Z*_n directly: under
-    DJN §4.1 the randomness is an EXPONENT from a mode-specific range, and
+    DJN 4.1 the randomness is an EXPONENT from a mode-specific range, and
     sampling a full-width base here would silently produce a
     correct-but-unoptimized ciphertext -- self consistent, verifying, and
     slower than the standard path it was meant to beat. Nothing would have
@@ -660,7 +656,7 @@ class PaillierPublicKey:
   def encrypt(self, plaintext):
     return self.encrypt_return_r(plaintext)[0]
 
-  # --- trustee-key combination (build spec §4.6, enforcement point 1) ------
+  # --- trustee-key combination (build spec 4.6, enforcement point 1) ------
 
   def __mul__(self, other):
     """
@@ -685,7 +681,7 @@ class PaillierPublicKey:
 
     raise NotImplementedError(
       "Paillier trustee keys cannot be combined; threshold Paillier requires "
-      "DKG, which is out of scope. See PAILLIER_BUILD_SPEC.md §4.6.")
+      "DKG, which is out of scope. See PAILLIER_BUILD_SPEC.md 4.6.")
 
   # --- the scheme-dispatch interface homomorphic.py depends on ------------
   #
@@ -708,7 +704,7 @@ class PaillierPublicKey:
     Fresh encryption randomness.
 
     Standard: a base, uniform on Z*_n.
-    DJN §4.1: an exponent, uniform on [0, exponent_bound) -- that is,
+    DJN 4.1: an exponent, uniform on [0, exponent_bound) -- that is,
     [0, 2^ceil(k/2)) under 'short' and [0, n // 2) under 'long'.
     """
     if self.uses_djn_41:
@@ -722,13 +718,13 @@ class PaillierPublicKey:
     Standard: MULTIPLICATIVE. V = prod(v_i) mod n is correct because
     (prod v_i)^n = prod(v_i^n) mod n^2.
 
-    DJN §4.1: ADDITIVE, because the randomness is an exponent and
+    DJN 4.1: ADDITIVE, because the randomness is an exponent and
     hn^r1 * hn^r2 = hn^(r1+r2). Note there is no modulus: reducing would require
     ord(h), which divides lambda(n) and is secret. The sum outgrows a single
     exponent only by log2 of the number of summands -- 222 slots add 8 bits --
     which is what TABLE_HEADROOM_BITS covers.
 
-    So under §4.1 this coincides with ElGamal's additive form, which is a mild
+    So under 4.1 this coincides with ElGamal's additive form, which is a mild
     simplification of the identical-pipeline story rather than a complication.
     """
     if self.uses_djn_41:
@@ -737,7 +733,7 @@ class PaillierPublicKey:
 
   @property
   def randomness_identity(self):
-    """Multiplicative 1 for the standard path, additive 0 under §4.1."""
+    """Multiplicative 1 for the standard path, additive 0 under 4.1."""
     return 0 if self.uses_djn_41 else 1
 
   def proof_witness(self, randomness):
@@ -745,7 +741,7 @@ class PaillierPublicKey:
     The Pi_root witness v with u = v^n mod n^2, from the stored randomness.
 
     Standard: the randomness IS the witness.
-    DJN §4.1: the randomness is an exponent a, and the witness is
+    DJN 4.1: the randomness is an exponent a, and the witness is
     v = h^a mod n, because v^n = h^(an) = hn^a (mod n^2). This is the step
     that keeps the proof system unchanged. It uses the fixed-base table for h,
     so it costs one multiplication mod n per set bit of a.
@@ -780,7 +776,7 @@ class PaillierPublicKey:
   def ciphertext_class(self):
     return PaillierCiphertext
 
-  # --- decryption-proof verification (build spec §2.8) --------------------
+  # --- decryption-proof verification (build spec 2.8) --------------------
 
   def verify_decryption_proof(self, ciphertext, factor, proof,
                               challenge_generator=None):
@@ -803,8 +799,7 @@ class PaillierPublicKey:
 
     return proof.verify(u, self, challenge_generator)
 
-  # --- validation (mirrors EGPublicKey.validate_pk_params) ----------------
-
+  # mirrors EGPublicKey.validate_pk_params
   def validate_pk_params(self):
     if self.n is None or self.g is None:
       raise Exception("n and g must be present.")
@@ -828,12 +823,12 @@ class PaillierPublicKey:
 
     if not self.uses_djn_41:
       if self.h is not None or self.hn is not None:
-        raise Exception("h and hn are DJN §4.1 parameters; a standard key "
+        raise Exception("h and hn are DJN 4.1 parameters; a standard key "
                         "must not carry them.")
       return
 
     if self.h is None or self.hn is None:
-      raise Exception("a DJN §4.1 key must carry h and hn.")
+      raise Exception("a DJN 4.1 key must carry h and hn.")
     if not (0 < self.h < self.n):
       raise Exception("h out of range; it must be in Z*_n.")
     if math.gcd(self.h, self.n) != 1:
@@ -845,15 +840,15 @@ class PaillierPublicKey:
     if self.hn != pow(self.h, self.n, self.n2):
       raise Exception("hn != h^n mod n^2; ballot proofs would be unprovable.")
 
-  # --- serialization (build spec §5.3) ------------------------------------
+  # --- serialization (build spec 5.3) ------------------------------------
 
   def to_dict(self):
     # g is serialized even though it equals n+1: it costs nothing, mirrors
     # EGPublicKey's four redundant fields, and gives validate_pk_params
     # something to check.
     #
-    # h, hn and djn41_mode appear ONLY on a DJN §4.1 key, so a standard key
-    # serializes exactly as it did before §4.1 existed: {n, g}.
+    # h, hn and djn41_mode appear ONLY on a DJN 4.1 key, so a standard key
+    # serializes exactly as it did before 4.1 existed: {n, g}.
     d = {'n': str(self.n), 'g': str(self.g)}
     if self.uses_djn_41:
       d['h'] = str(self.h)
@@ -909,7 +904,7 @@ class PaillierSecretKey:
   def pk(self, value):
     self.public_key = value
 
-  # --- CRT precomputation (build spec §2.4) -------------------------------
+  # --- CRT precomputation (build spec 2.4) -------------------------------
 
   # The CRT constants are derived state, and they are computed LAZILY rather
   # than in __init__.
@@ -952,7 +947,7 @@ class PaillierSecretKey:
   # --- CRT exponentiation, available only to the factorization holder ------
   #
   # These accelerate the DECRYPTION PROOF, which is distinct from decryption
-  # itself (already CRT-accelerated in decrypt_factor). Masterplan §4.7:
+  # itself (already CRT-accelerated in decrypt_factor). Masterplan 4.7:
   # "Steps 3 and 4's commitment are both CRT-accelerable, since only the
   # trustee runs them."
   #
@@ -963,7 +958,7 @@ class PaillierSecretKey:
   # fair implementation shows ~6x.
   #
   # That matters more than a typical optimization because of the exposure
-  # argument in masterplan §6.2: five of the six reported metrics are
+  # argument in masterplan 6.2: five of the six reported metrics are
   # structurally immune to the "you under-optimized Paillier" objection,
   # because the party doing the work does not hold the factorization. The
   # voter cannot use CRT; the aggregating server cannot; a public verifier
@@ -1008,7 +1003,7 @@ class PaillierSecretKey:
     """
     Precompute the per-key CRT constants.
 
-    The algorithm is Paillier (1999) §7, "Decryption using Chinese-remaindering",
+    The algorithm is Paillier (1999) 7, "Decryption using Chinese-remaindering",
     which gives exactly these precomputations, and the m_p / m_q formulas used
     in decrypt_factor:
 
@@ -1037,14 +1032,14 @@ class PaillierSecretKey:
     # For CRT exponentiation modulo n^2 = p^2 * q^2 (see crt_pow_n2).
     self._p2_inv_q2 = number.inverse((p * p) % (q * q), q * q)
 
-  # --- decryption (build spec §2.4) ---------------------------------------
+  # --- decryption (build spec 2.4) ---------------------------------------
 
   def decrypt_no_crt(self, ciphertext):
     """
         Dec(c) = L(c^lambda mod n^2) * mu  mod n
 
     One exponentiation at a 4096-bit modulus with a 2048-bit exponent. Kept
-    alongside the CRT path as an ablation target (build spec §B10): the
+    alongside the CRT path as an ablation target (build spec B10): the
     difference between the two is what CRT is worth, predicted ~3.9x.
     """
     n = self.public_key.n
@@ -1060,7 +1055,7 @@ class PaillierSecretKey:
         m_q = L_q(c^(q-1) mod q^2) * h_q  mod q
         m   = m_p + p * ((m_q - m_p) * p_inv mod q)          (Garner)
 
-    Paillier (1999) §7, "Decryption using Chinese-remaindering", gives m_p, m_q
+    Paillier (1999) 7, "Decryption using Chinese-remaindering", gives m_p, m_q
     and h_p, h_q (see _precompute_crt) and recombines with CRT(m_p, m_q); the
     last line is that recombination, written as Garner's formula.
 
@@ -1082,7 +1077,7 @@ class PaillierSecretKey:
 
   def decryption_factor(self, ciphertext):
     """
-    THE SANCTIONED DIVERGENCE (masterplan §3.3).
+    THE SANCTIONED DIVERGENCE (masterplan 3.3).
 
     ElGamal-Helios decrypts in two steps: each trustee publishes alpha^x, the
     factors are combined, and DLogTable recovers the exponent. Single-trustee
@@ -1105,7 +1100,7 @@ class PaillierSecretKey:
       dec_factor = self.decryption_factor(ciphertext)
     return PaillierPlaintext(dec_factor, self.public_key)
 
-  # --- proof of correct decryption (build spec §2.8) ----------------------
+  # --- proof of correct decryption (build spec 2.8) ----------------------
 
   def decryption_factor_and_proof(self, ciphertext, challenge_generator=None):
     """
@@ -1164,7 +1159,7 @@ class PaillierSecretKey:
     m, proof = self.decryption_factor_and_proof(ciphertext)
     return m, proof.to_dict()
 
-  # --- trustee proof of knowledge (build spec §4.4) -----------------------
+  # --- trustee proof of knowledge (build spec 4.4) -----------------------
 
   def prove_sk(self, challenge_generator):
     """
@@ -1270,7 +1265,7 @@ class PaillierCiphertext:
       return False
     return self.c == other.c
 
-  # --- ballot validity proofs (build spec §2.6, §2.7) ---------------------
+  # --- ballot validity proofs (build spec 2.6, 2.7) ---------------------
 
   def _statement_for(self, plaintext):
     """
@@ -1293,7 +1288,7 @@ class PaillierCiphertext:
 
   def generate_encryption_proof(self, plaintext, randomness, challenge_generator):
     # The stored randomness is the Pi_root witness under the standard scheme,
-    # and an exponent under DJN §4.1 -- pk.proof_witness resolves the two.
+    # and an exponent under DJN 4.1 -- pk.proof_witness resolves the two.
     # Everything downstream of this line is identical in both modes.
     return PaillierZKProof.generate(
       self._statement_for(plaintext), self.pk.proof_witness(randomness),
@@ -1376,7 +1371,7 @@ class PaillierCiphertext:
 
   def decrypt(self, decryption_factors, public_key):
     """
-    Single trustee (build spec §4.6, enforcement point 4).
+    Single trustee (build spec 4.6, enforcement point 4).
 
     combine_decryptions (models.py:519-528) always passes a LIST of per-trustee
     factor sets. Returning decryption_factors[0] silently would produce a
@@ -1388,7 +1383,7 @@ class PaillierCiphertext:
       raise NotImplementedError(
         "Paillier elections support exactly one trustee, got %s decryption "
         "factor sets; threshold Paillier requires DKG, which is out of scope. "
-        "See PAILLIER_BUILD_SPEC.md §4.6." % len(decryption_factors))
+        "See PAILLIER_BUILD_SPEC.md 4.6." % len(decryption_factors))
 
     return int(decryption_factors[0])
 
@@ -1418,12 +1413,12 @@ class PaillierCiphertext:
 
 
 # ---------------------------------------------------------------------------
-# Pi_root — proof of knowledge of an n-th root (build spec §2.5)
+# Pi_root — proof of knowledge of an n-th root (build spec 2.5)
 # ---------------------------------------------------------------------------
 
 class PaillierZKProof:
   """
-  Counterpart of algs.EGZKProof. DJN §5.2 at s = 1, the Paillier analogue of
+  Counterpart of algs.EGZKProof. DJN 5.2 at s = 1, the Paillier analogue of
   Chaum-Pedersen.
 
       Statement:  u in Z*_{n^2} is an n-th power: exists v in Z*_n, u = v^n mod n^2
@@ -1470,7 +1465,7 @@ class PaillierZKProof:
     """
     n, n2 = pk.n, pk.n2
 
-    # Z*_n in EVERY mode, never pk.random_randomness(): under DJN §4.1 that is
+    # Z*_n in EVERY mode, never pk.random_randomness(): under DJN 4.1 that is
     # an exponent from a narrower range, and the zero-knowledge argument needs
     # r uniform on Z*_n -- r is what hides v^e in z = r * v^e.
     r = random_z_star_n(n)
@@ -1508,7 +1503,7 @@ class PaillierZKProof:
       challenge = random_lt(CHALLENGE_MODULUS)
 
     # Z*_n in every mode too. An honest z = r * v^e mod n is uniform on Z*_n,
-    # so a simulated z from any other range -- such as a DJN §4.1 exponent
+    # so a simulated z from any other range -- such as a DJN 4.1 exponent
     # range -- marks the real branch. The booth once shipped exactly that bug.
     z = random_z_star_n(n)
     a = (pow(z, n, n2) * number.inverse(pow(u, challenge, n2), n2)) % n2
@@ -1524,7 +1519,7 @@ class PaillierZKProof:
     if self.commitment is None or self.challenge is None or self.response is None:
       return False
 
-    # DJN §5.2: the challenge is "a random t bit number". The disjunctive
+    # DJN 5.2: the challenge is "a random t bit number". The disjunctive
     # verifier checks only that the branch challenges SUM to the hash mod 2^160,
     # and a false branch verifies for every challenge in one residue class mod
     # n -- so without this bound, adding k*n to one challenge (n is odd, hence
@@ -1591,7 +1586,7 @@ class PaillierZKDisjunctiveProof:
 
 def extract_witness(u, pk, transcript_a, e1, z1, e2, z2):
   """
-  Special-soundness extraction (build spec §2.5, test 10).
+  Special-soundness extraction (build spec 2.5, test 10).
 
   From two accepting transcripts (a, e1, z1) and (a, e2, z2) with e1 != e2:
 

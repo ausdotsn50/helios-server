@@ -1,5 +1,5 @@
 """
-Capture the ElGamal golden-ballot baseline (build spec §7, test 15).
+Capture the ElGamal golden-ballot baseline (build spec 7, test 15).
 
     uv run python -m helios.capture_golden_ballot
 

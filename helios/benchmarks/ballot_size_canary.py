@@ -1,5 +1,5 @@
 """
-Milestone B8 — the ballot-size canary (masterplan §5.3).
+Milestone B8 — the ballot-size canary (masterplan 5.3).
 
     uv run python -m helios.benchmarks.ballot_size_canary [--scheme both]
 
@@ -16,8 +16,8 @@ the proof construction: if the measured Paillier ballot is not within 10% of
 A proof layer can be sound, verify correctly, and still have the wrong number of
 branches; this catches that.
 
-The target of 1,142 KiB supersedes IMPLEMENTATION_SPEC.md §2.6's 1.19 MiB, which
-assumed a 256-bit challenge. Build spec §2.9 fixes t = 160, removing 29 decimal
+The target of 1,142 KiB supersedes IMPLEMENTATION_SPEC.md 2.6's 1.19 MiB, which
+assumed a 256-bit challenge. Build spec 2.9 fixes t = 160, removing 29 decimal
 digits from every proof branch. Using the old number would have raised a false
 alarm here.
 
@@ -51,7 +51,7 @@ ANSWERS = [list(range(12)), [0]]        # a full 12-senator vote, one party-list
 CANARY_TARGET_KIB = 1142.0
 CANARY_TOLERANCE = 0.10
 
-# Predictions under test (masterplan §5.3), reported alongside the measurement.
+# Predictions under test (masterplan 5.3), reported alongside the measurement.
 PREDICTED = {
   'elgamal_ballot_kib': 909.5,
   'paillier_ballot_kib': 1142.2,
@@ -156,7 +156,7 @@ def main(argv=None):
     driver.get(f'file://{harness}')
     if not driver.execute_script('return window.__loaded'):
       raise RuntimeError('bundle did not expose HELIOS/Paillier/CRYPTO — is '
-                         'paillier.js in the bundle? See build spec §6.4')
+                         'paillier.js in the bundle? See build spec 6.4')
     driver.execute_script('return window.__seed()')
 
     for scheme in schemes:
@@ -207,7 +207,7 @@ def report(results):
 
   if len(results) == 2:
     eg, pa = results['elgamal'], results['paillier']
-    print('\n  MEASURED vs PREDICTED (masterplan §5.3)')
+    print('\n  MEASURED vs PREDICTED (masterplan 5.3)')
     rows = [
       ('ciphertext ratio Pa/EG', pa['ciphertext_kib'] / eg['ciphertext_kib'],
        PREDICTED['ciphertext_ratio']),

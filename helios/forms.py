@@ -29,11 +29,11 @@ class ElectionForm(forms.Form):
     choices=Election.CRYPTO_SCHEMES,
     help_text='Paillier is experimental and supports exactly one trustee.')
 
-  # Optimization ablations (masterplan §6.3). Per-election so the workload can
+  # Optimization ablations (masterplan 6.3). Per-election so the workload can
   # vary them cell by cell without restarting anything, and so a stored
   # election records what it actually ran under.
   paillier_djn41_mode = forms.ChoiceField(
-    required=False, initial='off', label="Paillier: DJN §4.1 encryption",
+    required=False, initial='off', label="Paillier: DJN 4.1 encryption",
     choices=Election.PAILLIER_DJN41_MODES,
     help_text='Fixed-base encryption. "short" is fastest but assumes more than '
               'decisional composite residuosity; "long" assumes nothing extra.')
@@ -73,14 +73,14 @@ class ElectionForm(forms.Form):
   # bool(value). Since bool("0") is True, posting "0" to turn a flag OFF turns
   # it ON -- silently, and with the form reporting valid.
   #
-  # That is exactly how a §4.1 ablation cell inherited the previous cell's
+  # That is exactly how a 4.1 ablation cell inherited the previous cell's
   # setting: the run stamped djn41=False on its records while the election was
   # created with djn41=True. The acceptance cross-check caught it, which is the
   # argument for having built that check.
   #
   # The CRT flag therefore reads self.data directly, so that "0", "false", ""
   # and absence all mean what a caller would expect, independent of widget
-  # behaviour. (The §4.1 setting has since become a three-way choice, which a
+  # behaviour. (The 4.1 setting has since become a three-way choice, which a
   # ChoiceField validates as one; see clean_paillier_djn41_mode.)
 
   FALSEY = ('', '0', 'false', 'False', 'off', 'no')

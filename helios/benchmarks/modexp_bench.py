@@ -1,11 +1,11 @@
 """
-Milestone B2a — modular-exponentiation microbenchmark (build spec §9).
+Milestone B2a — modular-exponentiation microbenchmark (build spec 9).
 
     uv run python -m helios.benchmarks.modexp_bench [--samples 30] [--json out.json]
 
 Why this runs BEFORE the proof layer
 ------------------------------------
-The masterplan's §5 cost model predicts Paillier encryption at 13.7x ElGamal and
+The masterplan's 5 cost model predicts Paillier encryption at 13.7x ElGamal and
 CRT decryption at 6.2x, with CRT itself worth 3.9x. Those numbers currently rest
 on a derivation, not a measurement, and they drive both the sweep design and one
 manuscript conclusion. Measuring them costs minutes; discovering they are wrong
@@ -56,7 +56,7 @@ import time
 
 from Crypto.Util import number
 
-# Predictions under test (masterplan §5.1). Reported alongside the measurement
+# Predictions under test (masterplan 5.1). Reported alongside the measurement
 # so a disagreement is visible rather than quietly absorbed.
 PREDICTED = {
   'encryption_ratio': 13.7,
@@ -64,7 +64,7 @@ PREDICTED = {
   'crt_speedup': 3.9,
 }
 
-# Build spec §9: if measurement and prediction differ by more than this, stop and
+# Build spec 9: if measurement and prediction differ by more than this, stop and
 # report before B3 -- the sweep design and a manuscript conclusion depend on them.
 TOLERANCE = 0.25
 
@@ -125,7 +125,7 @@ def run(samples=30):
 
   results = {}
 
-  # --- the four primitives build spec §9 names -----------------------------
+  # --- the four primitives build spec 9 names -----------------------------
 
   results['elgamal_encrypt_modexp'] = _time_op(
     lambda: pow(eg['g'], eg['e256'], eg['p']), samples)
@@ -234,7 +234,7 @@ def report(out):
   bad = [v for v in verdicts if v[1] != 'OK']
   print()
   if bad:
-    print('  STOP AND REPORT BEFORE B3 (build spec §9): '
+    print('  STOP AND REPORT BEFORE B3 (build spec 9): '
           + ', '.join(f'{lbl} off by {dl:+.1%}' for lbl, _, dl in bad))
   else:
     print('  All ratios within +/-%d%% of prediction — B3 may proceed.'

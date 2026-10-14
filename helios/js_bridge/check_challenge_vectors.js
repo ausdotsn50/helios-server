@@ -47,7 +47,7 @@ function main() {
     results.push({label: v.label, expected: v.challenge, got: got, ok: ok});
   }
 
-  // The single-commitment wrapper is exercised separately: §2.8's decryption
+  // The single-commitment wrapper is exercised separately: 2.8's decryption
   // proof goes through it, and a wrapper that failed to delegate would be
   // invisible to the list-based cases above.
   const single = vectors.find((v) => v.commitments.length === 1);

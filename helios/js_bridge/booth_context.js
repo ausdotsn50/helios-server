@@ -6,7 +6,7 @@
  * scripts that communicate through globals, so they are evaluated into one
  * shared vm context in the order boothworker-single.js importScripts them.
  *
- * Location note: build spec §7 asks for this shim under helios/tests/js_bridge/.
+ * Location note: build spec 7 asks for this shim under helios/tests/js_bridge/.
  * It is here instead because helios/tests.py already exists as a module, and a
  * helios/tests/ package would shadow it and break the upstream suite.
  *

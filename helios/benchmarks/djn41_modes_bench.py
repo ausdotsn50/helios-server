@@ -1,5 +1,5 @@
 """
-DJN §4.1 modes micro-benchmark: what each encryption function costs per
+DJN 4.1 modes micro-benchmark: what each encryption function costs per
 ciphertext, and what it costs up front.
 
     uv run python manage.py shell -c "exec(open('helios/benchmarks/djn41_modes_bench.py').read())"
@@ -101,7 +101,7 @@ def _ciphertext_step(pk, rs, use_tables=True):
 
 
 def main():
-  print('DJN §4.1 modes -- %s' % LABEL, flush=True)
+  print('DJN 4.1 modes -- %s' % LABEL, flush=True)
   print('Key generation takes a while: %d runs per mode, with safe primes in '
         'the two DJN modes.\n' % KEYGEN_RUNS, flush=True)
 
@@ -131,7 +131,7 @@ def main():
     steps[label] = _ciphertext_step(pk, rs, use_tables)
 
   n_bits = keys['off'].pk.n.bit_length()
-  print('\nDJN §4.1 modes -- %s' % LABEL)
+  print('\nDJN 4.1 modes -- %s' % LABEL)
   print('|n| = %d bits for every key; medians over the runs, (min-max)\n'
         % n_bits)
 

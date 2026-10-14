@@ -1,5 +1,5 @@
 """
-Generate helios/fixtures/challenge_vectors.json (build spec §6.1, milestone B1).
+Generate helios/fixtures/challenge_vectors.json (build spec 6.1, milestone B1).
 
     uv run python -m helios.capture_challenge_vectors
 

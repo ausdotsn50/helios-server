@@ -16,3 +16,6 @@ PAILLIER_BUILD_SPEC.md
 PAILLIER_MASTERPLAN.md
 helios/tests_paillier.py
 helios/tests_measure_parity.py
+
+# local docs (not for the repo)
+docs/
