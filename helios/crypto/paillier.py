@@ -370,21 +370,10 @@ def paillier_fiatshamir_challenge_generator(commitment):
   """
   return paillier_disjunctive_challenge_generator([commitment])
 
-
-# ---------------------------------------------------------------------------
-# Cryptosystem (build spec 2.1, 4.1)
-# ---------------------------------------------------------------------------
-
+# Paillier cryptosystem
 class Paillier:
   """
   Counterpart of elgamal.Cryptosystem.
-
-  The structural asymmetry worth naming up front: ElGamal's group parameters
-  (p, q, g) are hardcoded constants in views.py, so keygen is one exponentiation
-  in a fixed group. Paillier has no fixed public parameters -- every keypair
-  requires two fresh 1024-bit primes. That gap is architectural rather than
-  algorithmic, and the manuscript reports it as such rather than as a
-  like-for-like algorithmic comparison.
   """
 
   def __init__(self, key_size=DEFAULT_KEY_SIZE, djn41_mode='off'):
