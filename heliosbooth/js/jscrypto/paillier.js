@@ -2,15 +2,7 @@
  * Paillier cryptosystem for the Helios voting booth.
  *
  * Browser twin of helios/crypto/paillier.py. Structured as a mirror of
- * elgamal.js, which is a proven template for this exact shape.
- *
- * BIGNUM: this file uses Helios's vendored jsbn via the BigInt wrapper in
- * bigint.js, and MUST NOT use native BigInt. Native BigInt would make Paillier
- * faster for reasons that have nothing to do with Paillier and would invalidate
- * the comparison the thesis exists to make. Helios's jsbn is also modified --
- * limbs are this.arr[i], not this[i] -- so only public methods are safe to
- * depend on: modPow, modInverse, multiply, mod, gcd, add, subtract, equals,
- * compareTo, signum, shiftLeft, shiftRight, bitLength, testBit, toString.
+ * elgamal.js.
  */
 
 var Paillier = {};
@@ -44,7 +36,7 @@ Paillier.PublicKey = Class.extend({
 
   // Enc(m, v) = (1 + m*n) * v^n mod n^2
   encrypt: function(plaintext, r) {
-    if (r == null) {
+    if (r == null) { // safety mirror from eg
       r = this.randomRandomness();
     }
     var one_plus_mn = BigInt.ONE.add(plaintext.m.multiply(this.n)).mod(this.n2);
@@ -54,14 +46,13 @@ Paillier.PublicKey = Class.extend({
     // squarings.
     var blinding = this.usesDJN41()
         ? Paillier.fixedBasePow(this.hn, this.fixedBaseTables().hn, r, this.n2)
-        : r.modPow(this.n, this.n2);
+        : r.modPow(this.n, this.n2); // modPow: base, exp, mod
 
     return new Paillier.Ciphertext(one_plus_mn.multiply(blinding).mod(this.n2),
                                    this);
   },
 
-  // --- DJN 4.1 -------------------------------------------------------------
-
+  // DJN 4.1
   usesDJN41: function() {
     return this.djn41_mode != 'off';
   },
@@ -93,15 +84,14 @@ Paillier.PublicKey = Class.extend({
     return this.tables;
   },
 
-  // The Pi_root witness v with u = v^n mod n^2, derived from the stored
-  // randomness. Standard: the randomness IS the witness. DJN 4.1: the
-  // randomness is an exponent a and the witness is h^a mod n, because
-  // (h^a)^n = hn^a (mod n^2). This is the one step that keeps the proof system
-  // unchanged between the modes.
+  // The witness v with u = v^n mod n^2, derived from the stored randomness.
+  // Standard: the randomness IS the witness. 
   proofWitness: function(randomness) {
     if (!this.usesDJN41())
       return randomness;
 
+    // DJN 4.1: the randomness is an exponent a and the witness is h^a mod n, because
+    // (h^a)^n = hn^a (mod n^2). 
     return Paillier.fixedBasePow(this.h, this.fixedBaseTables().h, randomness,
                                  this.n);
   },
@@ -125,15 +115,6 @@ Paillier.PublicKey = Class.extend({
     return plaintexts;
   },
 
-  // Uniform on Z*_n. SEPARATE from randomRandomness() on purpose.
-  //
-  // Pi_root's commitment randomness and its simulated responses must be
-  // uniform on Z*_n in EVERY mode. randomRandomness() is the ENCRYPTION
-  // randomness, and under DJN 4.1 that is an exponent from a narrower range --
-  // wiring the proof to it made simulated branches ~510 bits where the real
-  // branch was ~2045, so the real branch was identifiable by bit length and
-  // ballot secrecy was gone. Every proof still verified. This is the ishaq
-  // failure mode, and the reason these two samplers are distinct functions.
   randomZStarN: function() {
     var v;
     do {
@@ -143,19 +124,12 @@ Paillier.PublicKey = Class.extend({
   },
 
   randomRandomness: function() {
-    // Random.getRandomInteger draws ceil(bitLength/32)+2 words from
-    // sjcl.random and reduces -- 64 bits of headroom, so bias is negligible.
-    // Do NOT introduce another RNG, and do not pull in jsbn's prng4/rng.
     if (this.usesDJN41()) {
       // An exponent, not an element of Z*_n: uniform on [0, exponentBound()).
       return Random.getRandomInteger(this.exponentBound());
     }
 
-    var v;
-    do {
-      v = Random.getRandomInteger(this.n);
-    } while (v.equals(BigInt.ZERO) || !v.gcd(this.n).equals(BigInt.ONE));
-    return v;
+    return this.randomZStarN();
   },
 
   // Standard: MULTIPLICATIVE. V = prod(v_i) mod n is the correct combined
@@ -177,7 +151,7 @@ Paillier.PublicKey = Class.extend({
   },
 
   disjunctiveChallengeGenerator: function() {
-    return Paillier.disjunctive_challenge_generator;
+    return Paillier.disjunctive_challenge_generator; // PK object calls disjunctive challenge gen (src helios.js)
   }
 });
 
@@ -209,11 +183,7 @@ Paillier.PublicKey.fromJSONObject = function(d) {
       mode);
 };
 
-
-// ---------------------------------------------------------------------------
-// Ciphertext
-// ---------------------------------------------------------------------------
-
+// Paillier Ciphertext obj
 Paillier.Ciphertext = Class.extend({
   init: function(c, pk) {
     this.c = c;
@@ -235,22 +205,13 @@ Paillier.Ciphertext = Class.extend({
         this.c.multiply(other.c).mod(this.pk.n2), this.pk);
   },
 
-  // u_j = c * (1+n)^(-m_j) mod n^2 = c * (1 - m_j*n) mod n^2
-  //
-  // ONE MULTIPLICATION, never an exponentiation, since
-  // (1 + j*n)(1 - j*n) = 1 - j^2 n^2 = 1 (mod n^2).
-  //
-  // Exactly one u_j is an n-th power -- the one matching the encrypted
-  // message -- with the encryption randomness as witness. That is why Pi_root
-  // is the right base protocol here.
+  // c encrypts j statement where if True only v^n remains
   statementFor: function(plaintext) {
     var mn = plaintext.m.multiply(this.pk.n);
     return this.c.multiply(BigInt.ONE.subtract(mn)).mod(this.pk.n2);
   },
 
   generateProof: function(plaintext, randomness, challenge_generator) {
-    // pk.proofWitness resolves the standard/DJN-4.1 difference; everything
-    // downstream of this line is identical in both modes.
     return Paillier.Proof.generate(this.statementFor(plaintext),
                                    this.pk.proofWitness(randomness),
                                    this.pk, challenge_generator);
@@ -274,20 +235,21 @@ Paillier.Ciphertext = Class.extend({
   generateDisjunctiveProof: function(list_of_plaintexts, real_index, randomness,
                                      challenge_generator) {
     var self = this;
-
+    
+    // Fake branch
     var proofs = _(list_of_plaintexts).map(function(plaintext, p_num) {
       if (p_num == real_index) {
         // no real proof yet
         return {};
       } else {
-        // simulate!
+        // simulate
         return self.simulateProof(plaintext);
       }
     });
 
     // do the real proof
     var real_proof = this.generateProof(
-        list_of_plaintexts[real_index], randomness, function(commitment) {
+        list_of_plaintexts[real_index], randomness, function(commitment) { // last arg is a func
       // set up the partial real proof so we're ready to get the hash
       proofs[real_index] = {'commitment': commitment};
 
@@ -296,9 +258,9 @@ Paillier.Ciphertext = Class.extend({
         return proof.commitment;
       });
 
-      var disjunctive_challenge = challenge_generator(commitments);
+      var disjunctive_challenge = challenge_generator(commitments); // equiv to var s
 
-      // now we must subtract all of the other challenges from this challenge.
+      // now we must subtract all of the other challenges from this challenge
       var real_challenge = disjunctive_challenge;
       _(proofs).each(function(proof, proof_num) {
         if (proof_num != real_index)
@@ -351,10 +313,7 @@ Paillier.Ciphertext.fromJSONObject = function(d, pk) {
 };
 
 
-// ---------------------------------------------------------------------------
-// Plaintext
-// ---------------------------------------------------------------------------
-
+// Paillier plaintext obj
 Paillier.Plaintext = Class.extend({
   // m is the integer ITSELF. There is no g^m encoding and no encode_m flag,
   // because Paillier needs neither.
@@ -373,22 +332,17 @@ Paillier.Plaintext = Class.extend({
 });
 
 
-// ---------------------------------------------------------------------------
-// Pi_root transcript
-// ---------------------------------------------------------------------------
+// DJN nth root proof
 
 Paillier.Proof = Class.extend({
-  // commitment is a SCALAR, where ElGamal.Proof's is {A, B}. Chaum-Pedersen
-  // commits to two values; Pi_root commits to one. That is the reason
-  // Paillier's proof layer is relatively cheaper than its ciphertext
-  // arithmetic alone would suggest, and it is the discriminator the server's
-  // datatype dispatch keys on.
+  // Proof constructor to designate a, e,z accodingly
   init: function(commitment, challenge, response) {
     this.commitment = commitment;
     this.challenge = challenge;
     this.response = response;
   },
 
+  // Returns each proof in this json object format
   toJSONObject: function() {
     return {
       commitment: this.commitment.toJSONObject(),
@@ -439,33 +393,29 @@ Paillier.Proof.fromJSONObject = function(d) {
 };
 
 // Honest proof that u is an n-th power with witness v.
-//
-// THE REDUCTION MODULUS IN THE RESPONSE IS NOT COSMETIC. z is reduced mod n,
-// never mod n^2. Reducing mod n^2 still verifies -- z^n mod n^2 depends only on
-// z mod n^2 -- while making the honest branch's z about twice the bit length of
-// every simulated branch's, so the real branch becomes identifiable by
-// inspection and ballot secrecy is gone. That is the bug in
-// ishaq/Paillier-E-Voting, and it is invisible to functional testing.
+// For Paillier proof we need the values a,e,z
 Paillier.Proof.generate = function(u, v, pk, challenge_generator) {
-  // randomZStarN, NOT randomRandomness: see the note on randomZStarN.
-  var r = pk.randomZStarN();
-  var a = r.modPow(pk.n, pk.n2);
+  var r = pk.randomZStarN(); 
+  var a = r.modPow(pk.n, pk.n2); // Commit
 
-  var e = challenge_generator(a);
-  var z = r.multiply(v.modPow(e, pk.n)).mod(pk.n);   // mod n -- see above
+  var e = challenge_generator(a); // Challenge
+  var z = r.multiply(v.modPow(e, pk.n)).mod(pk.n); // Respond
 
   return new Paillier.Proof(a, e, z);
 };
 
-// Simulated transcript: given e, pick z and solve for a.
-Paillier.Proof.simulate = function(u, pk, challenge) {
+// Simulated transcript: given e, pick z and solve for a
+/*
+  For honest verifier simulation, the simulator chooses a 
+  - random z ∈ Z∗n, 
+  - a random e, 
+  - sets a = E(0,z)u−e mod ns+1 and outputs (a,e,z)
+*/
+Paillier.Proof.simulate = function(u, pk, challenge) { // e as challenge
   if (challenge == null) {
     challenge = Random.getRandomInteger(Paillier.CHALLENGE_MODULUS);
   }
 
-  // randomZStarN, NOT randomRandomness: a simulated response drawn from the
-  // encryption randomness would be short under DJN 4.1 and would give the real
-  // branch away.
   var z = pk.randomZStarN();
   var a = z.modPow(pk.n, pk.n2)
            .multiply(u.modPow(challenge, pk.n2).modInverse(pk.n2))
@@ -475,10 +425,7 @@ Paillier.Proof.simulate = function(u, pk, challenge) {
 };
 
 
-// ---------------------------------------------------------------------------
-// Disjunctive proof — serializes as a BARE ARRAY
-// ---------------------------------------------------------------------------
-
+// Disjunctive proof
 Paillier.DisjunctiveProof = Class.extend({
   init: function(list_of_proofs) {
     this.proofs = list_of_proofs;
@@ -510,10 +457,8 @@ Paillier.encrypt = function(pk, plaintext, r) {
 };
 
 
-// ---------------------------------------------------------------------------
-// DJN 4.1 fixed-base exponentiation
-// ---------------------------------------------------------------------------
 
+// DJN 4.1 fixed-base exponentiation
 // [base^(2^i) mod modulus for i < bits], by repeated squaring.
 Paillier.fixedBaseTable = function(base, modulus, bits) {
   var table = [base.mod(modulus)];
@@ -541,29 +486,15 @@ Paillier.fixedBasePow = function(base, table, exponent, modulus) {
 };
 
 
-// ---------------------------------------------------------------------------
-// Challenge generation (build spec 2.9)
-// ---------------------------------------------------------------------------
-//
-// Byte-exact twin of paillier_disjunctive_challenge_generator in
-// helios/crypto/paillier.py. Any disagreement here means every ballot verifies
-// in the booth and every cast fails on the server, with the symptom nowhere
-// near the cause -- so helios/fixtures/challenge_vectors.json pins both
-// implementations to the same values, and milestone B1 tests it before any
-// proof code exists on either side.
-
+// Challenge generator, used for real proof branch in Paillier
 Paillier.disjunctive_challenge_generator = function(commitments) {
   var strings_to_hash = _(commitments).map(function(a) {
-    // toJSONObject rather than toString, matching elgamal.js's
-    // "toJSONObject instead of toString because of IE weirdness". bigint.js
-    // defines toJSONObject as this.toString(), i.e. radix 10 -- the same
-    // decimal form Python's str(int) produces.
     return a.toJSONObject();
   });
 
-  // SHA-1's output is exactly 160 bits, so the reduction is a no-op. It is kept
-  // because it documents the invariant that a challenge is < 2^160, which the
-  // branch-challenge summation in the disjunctive proof relies on.
+  // SHA-1's output is exactly 160 bits
+  // use Helios' own BigInt lib
+  // hex_sha1(): takes a string and returns its SHA-1 digest written as a hex string
   return new BigInt(hex_sha1(strings_to_hash.join(",")), 16)
       .mod(Paillier.CHALLENGE_MODULUS);
 };

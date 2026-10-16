@@ -218,7 +218,7 @@ HELIOS.EncryptedAnswer = Class.extend({
     var enc_result = this.doEncryption(question, answer, pk, null, progress);
 
     this.choices = enc_result.choices;
-    this.randomness = enc_result.randomness;
+    this.randomness = enc_result.randomness; // Keeps randomness denoted as r or v as witness
     this.individual_proofs = enc_result.individual_proofs;
     this.overall_proof = enc_result.overall_proof;    
   },
@@ -266,7 +266,7 @@ HELIOS.EncryptedAnswer = Class.extend({
       
       // generate proof
       if (generate_new_randomness) {
-        // generate proof that this ciphertext is a 0 or a 1
+        // Per answer slot proof: generate proof that this ciphertext is a 0 or a 1
         individual_proofs[i] = choices[i].generateDisjunctiveProof(zero_one_plaintexts, plaintext_index, randomness[i], pk.disjunctiveChallengeGenerator());
       }
       
@@ -274,10 +274,9 @@ HELIOS.EncryptedAnswer = Class.extend({
         progress.tick();
     }
 
+    // Overall proof for questions with max value limit
     if (generate_new_randomness && question.max != null) {
-      // we also need proof that the whole thing sums up to the right number
-      // only if max is non-null, otherwise it's full approval voting
-    
+      
       // compute the homomorphic sum of all the options
       var hom_sum = choices[0];
       var rand_sum = randomness[0];
