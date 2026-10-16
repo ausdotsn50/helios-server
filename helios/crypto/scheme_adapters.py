@@ -1,39 +1,5 @@
 """
-Scheme-dispatch adapters for the ElGamal arm.
-
-WHAT THIS MODULE IS, AND WHY IT IS SHAPED THIS WAY
---------------------------------------------------
-helios/workflows/homomorphic.py named `algs` in nine places, all scheme-specific.
-To host a second cryptosystem without duplicating the tallying algorithms, that
-scheme-specific behaviour moves onto the public key object -- which
-homomorphic.py already holds in every one of those scopes. After the move,
-homomorphic.py contains ZERO references to `algs` or to any scheme name, which
-is what makes the "identical pipeline" claim inspectable rather than argued.
-
-The Paillier side of that interface lives naturally on PaillierPublicKey. The
-ElGamal side has nowhere to live, because the experiment forbids editing
-helios/crypto/algs.py and helios/crypto/elgamal.py -- not one line. So this
-module attaches the ElGamal implementations onto those classes at import time.
-
-THIS IS A MONKEY-PATCH, AND IT IS THE ONE PLACE THE DESIGN TRADES PURITY FOR THE
-NO-EDIT RULE. A reviewer should see it, which is why it is an explicit module
-with this docstring rather than a few lines tucked into an __init__.
-
-Every method body below is COPIED VERBATIM from the call site it replaces, so
-the refactor is behaviour-preserving by construction rather than by argument.
-The line references are to the pre-refactor homomorphic.py. helios/fixtures/
-elgamal_golden_ballot.json is the mechanical check: a fixed-seed ElGamal ballot
-must serialize byte-identically across this change (test 15).
-
-WHY BOTH CLASSES ARE PATCHED
-----------------------------
-Helios has two ElGamal lineages that have drifted apart. At runtime an
-election's public_key deserializes into helios.crypto.elgamal.PublicKey (that is
-legacy.EGPublicKey's WRAPPED_OBJ_CLASS), while homomorphic.py separately refers
-to algs.EGPlaintext and algs.EG_disjunctive_challenge_generator in the same
-function. Objects of both lineages coexist inside one ballot construction. Only
-elgamal.PublicKey is strictly required here; algs.EGPublicKey is patched too so
-that the interface holds whichever lineage a caller happens to be holding.
+Scheme-dispatch adapters
 """
 
 from helios.crypto import algs, elgamal

@@ -121,10 +121,6 @@ def _resolve_by_shape(d, ld_type):
         if 'commitment' in d and not isinstance(d['commitment'], dict):
             return 'paillier/ZKProof'
 
-    # legacy/DLogProof is not dispatched: the Paillier arm generates no trustee
-    # proof of knowledge of the secret key (build spec 4.4), so pok is stored
-    # as null and never reaches a shape decision.
-
     return ld_type
 
 

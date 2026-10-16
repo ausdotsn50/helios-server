@@ -1,37 +1,5 @@
 """
 Paillier datatypes for Helios.
-
-Mirrors legacy.py's structure for the Paillier arm. These are the LDObject
-wrappers that helios/datatypes/__init__.py routes to when a serialized object's
-shape identifies it as Paillier rather than ElGamal, or when the wrapped object
-declares its own `paillier/...` datatype.
-
-TWO THINGS HERE ARE NOT OPTIONAL:
-
-1. Every field appears in STRUCTURED_FIELDS. LDObject.toDict does
-
-       if not self.structured_fields:
-           if self.wrapped_obj.alias is not None:    # Voter-specific
-
-   so a datatype with no structured fields raises
-   `AttributeError: 'PaillierCiphertext' object has no attribute 'alias'` from
-   deep inside serialization. Every Paillier field is a big integer, so
-   declaring them all is natural rather than a workaround.
-
-2. ZKDisjunctiveProof serializes as a BARE ARRAY. This copies
-   legacy.EGZKDisjunctiveProof, which overrides toDict to return ...['proofs']
-   rather than the wrapping object. Get it wrong and `individual_proofs` changes
-   shape, which silently breaks the harness's proof_bytes slice -- silently,
-   because JSON.stringify(undefined) returns the string "undefined" with no
-   exception, and TextEncoder turns that into a plausible-looking 9 bytes.
-
-FIELD NAMING: the secret key's Carmichael function is `lambda_` on the object
-AND `lambda_` in the JSON. The masterplan's illustrative JSON (4.10) shows
-"lambda", but build spec 5.2 requires picking one spelling and never mixing;
-`lambda_` is chosen because it avoids the Python keyword without needing a
-process_value_in/out override. The secret key never leaves the server -- it is
-not sent to the booth or to any verifier -- so the spelling has no interop
-consequence.
 """
 
 from helios.crypto import paillier as crypto_paillier

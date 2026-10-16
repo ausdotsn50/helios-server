@@ -167,6 +167,7 @@ class EncryptedVote(WorkflowObject):
 
   answers = property(_answers_get, _answers_set)
 
+  # CastVote: answers/hash/uuid
   def verify(self, election):
     # correct number of answers
     # noinspection PyUnresolvedReferences

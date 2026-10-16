@@ -1,19 +1,5 @@
 """
 Paillier cryptosystem for the Helios Voting System.
-
-This module carries the WHOLE surface deliberately. Helios has two ElGamal
-lineages that have drifted apart -- helios/crypto/algs.py (EGPublicKey,
-EGCiphertext, ...) used by models.py and workflows/homomorphic.py, and
-helios/crypto/elgamal.py (PublicKey, Ciphertext, ...) used by
-datatypes/legacy.py as every WRAPPED_OBJ_CLASS. Objects of both lineages coexist
-inside a single ballot construction and it works only because they are duck-type
-compatible. Mirroring that split would produce a Paillier module that either the
-datatypes layer never instantiates or homomorphic.py cannot call. One module,
-pointed at by the new datatypes, avoids the whole problem.
-
-Parameters (build spec 2): k = 1024 bits per prime, so |n| = 2048 and
-|n^2| = 4096, matching ElGamal's 2048-bit p. Challenge width t = 160, matching
-Helios's existing SHA-1 generator. L(x) = (x-1)/n.
 """
 
 import math
@@ -32,66 +18,7 @@ DEFAULT_KEY_SIZE = 1024
 # Minimum modulus width accepted by validate_pk_params. Tests construct keys far
 # below this deliberately and never route them through validation.
 MIN_MODULUS_BITS = 2048
-
-
-# ---------------------------------------------------------------------------
-# DJN 4.1 — the alternative encryption function
-# ---------------------------------------------------------------------------
-#
-# Standard Paillier encrypts with  Enc(m, v) = (1 + m*n) * v^n mod n^2,  and the
-# exponent n is 2048 bits because it IS the modulus: the blinding factor must be
-# a random n-th residue, and the n-th residues have index n in Z*_{n^2}, which
-# is also what makes the message space Z_n. The exponent is not a tunable
-# security parameter, and it cannot be reduced (n < lambda(n^2) = n*lambda(n)).
-#
-# DJN 4.1 buys a shorter exponent by fixing a public base. As the paper
-# specifies it:
-#
-#   - n = pq with p = q = 3 (mod 4), gcd(p-1, q-1) = 2, and every odd prime
-#     factor of p-1 and q-1 large. In practice: SAFE primes, p = 2p'+1 and
-#     q = 2q'+1 with p', q' prime. See check_djn41_primes.
-#   - h = -x^2 mod n for a random x in Z*_n, which generates the group of
-#     elements of Jacobi symbol +1 except with negligible probability; and
-#     hn = h^n mod n^2. Both are public.
-#   - Enc(m, a) = (1 + m*n) * hn^a mod n^2, with the exponent a drawn from
-#
-#       'short'   [0, 2^ceil(k/2)),  k = |n|        (DJN's choice)
-#       'long'    [0, n/2)                         (DJN's alternative)
-#
-# 'long' is DJN's "choose a as a random number modulo n/2, instead of a random
-# k/2-bit number": the ciphertext is then statistically close to a standard
-# one, so it has "the same security" as standard Paillier "without any
-# assumptions". 'short' needs an assumption BEYOND decisional composite
-# residuosity -- that h^a for a random ceil(k/2)-bit a is indistinguishable
-# from a random element of the group h generates. 'off' is standard Paillier,
-# the default and the thesis's main arm; the two others are ablations.
-#
-# THE KEY PROPERTY, and the reason this costs no new proof theory: hn^a is an
-# n-th power by construction,
-#
-#     hn^a = (h^n)^a = (h^a)^n  (mod n^2)
-#
-# so the Pi_root witness is v = h^a mod n -- one exponentiation at |n| with the
-# same exponent. (Reducing mod n is safe: for any integer x,
-# (x mod n)^n = x^n (mod n^2), because every cross term of the binomial
-# expansion carries n^2.) Pi_root applies UNCHANGED: same statement, prover,
-# simulator, verifier, serialization and ballot size. Only the ciphertext's
-# blinding factor is produced differently.
-#
-# COST (DJN 4.2): with precomputed powers of the fixed base, an exponent of
-# b bits costs about b/2 modular multiplications and no squarings -- k/4 for
-# 'short', where v^n costs about 1.2k multiplications and squarings mod n^2.
-# The tables are hn^(2^i) mod n^2 and h^(2^i) mod n, built lazily on first
-# use and cached on the public key; see PaillierPublicKey.fixed_base_tables.
-#
-# Cite: Damgard, Jurik, Nielsen (2010) 4.1, 4.2.
-
 DJN41_MODES = ('off', 'short', 'long')
-
-# How far past a single exponent the fixed-base tables reach. The overall
-# proof's witness is h^(sum of a question's exponents), so the tables must
-# cover that sum: 16 bits covers up to 2^16 summands. A longer exponent falls
-# back to pow().
 TABLE_HEADROOM_BITS = 16
 
 
@@ -136,50 +63,7 @@ _SIEVE_BOUND = 1 << 12
 _SIEVE_PRIMES = _odd_primes_up_to(_SIEVE_BOUND)
 _SIEVE_PRODUCT = math.prod(_SIEVE_PRIMES)
 
-# Replaced pycryptodome's safe_prime function implementation
 def generate_safe_prime(bits):
-  """
-  A probable safe prime p = 2p'+1 of exactly `bits` bits, above
-  sqrt(2) * 2^(bits-1).
-
-  THE BOUND is the one getStrongPrime applies to standard keys: two primes
-  above it multiply to exactly 2*bits bits. Without it the product is a bit
-  short about 39% of the time (2 ln 2 - 1), and a 2047-bit n both fails
-  validate_pk_params and breaks the comparison at |n| = 2048.
-
-  THE SEARCH. Every attempt is a fresh, independent candidate from the
-  operating system's CSPRNG (secrets), never a step from the last one:
-
-    1. Draw p' = 6k + 5 uniformly, over the k that put p = 2p'+1 in
-       [min_p, 2^bits). That loses no safe prime: for p' > 3, p' = 1 (mod 3)
-       would make 3 divide 2p'+1, so every safe prime above 7 has
-       p' = 5 (mod 6).
-    2. Reject unless gcd(p' * p, M) = 1, where M is the product of the odd
-       primes up to _SIEVE_BOUND. One gcd discards every candidate in which
-       either number has a small factor, before any modular exponentiation.
-    3. Reject unless 2^(p-1) = 1 (mod p): a base-2 Fermat test on p.
-    4. Accept only if pycryptodome's full test_probable_prime passes on p',
-       then on p.
-
-  The generator this replaced produced a complete probable prime p' on every
-  attempt and only then tested 2p'+1, so nearly all of its work went into
-  primes it threw away.
-
-  UNIFORM OUTPUT. Each attempt draws uniformly and independently, and whether
-  it is accepted depends on the candidate alone, so the output is a uniform
-  draw from the accepted candidates -- which are exactly the safe primes in
-  range, up to the negligible false-positive rate of the probabilistic tests.
-  No safe prime in range is ever rejected: p' and p exceed the sieve bound,
-  and neither the Fermat test nor test_probable_prime rejects a prime. An
-  incremental search, stepping from a random start, would instead favour the
-  primes that follow long gaps.
-
-  COST, Python on the development machine
-  (helios/benchmarks/safe_prime_bench.py, .cache/safe_prime_bench.log): a
-  median of 12 s per 1024-bit prime over 10 runs (0.3-43 s; the time is a run
-  of independent tries, so the spread is intrinsic). At 512 bits, a median of
-  0.37 s against 13.7 s for the generator it replaced.
-  """
   return _generate_safe_prime(bits, _SIEVE_BOUND, _SIEVE_PRODUCT)
 
 
@@ -266,30 +150,7 @@ def _fixed_base_pow(base, table, exponent, modulus):
   return result
 
 
-# ---------------------------------------------------------------------------
-# Randomness
-# ---------------------------------------------------------------------------
-#
-# Helios's own sampler is biased and must not be copied. helios/crypto/utils.py:
-#
-#     def random_mpz_lt(maximum, strong_random=random):
-#         n_bits = int(math.floor(math.log(maximum, 2)))
-#         res = strong_random.getrandbits(n_bits)
-#         while res >= maximum:
-#             res = strong_random.getrandbits(n_bits)
-#         return res
-#
-# With floor(log2(maximum)) bits the draw can never reach `maximum`, so the
-# rejection loop never fires and the output is uniform on
-# [0, 2^floor(log2 max)) rather than [0, maximum). For Helios's 256-bit q that
-# makes roughly the top 5.5% of Z_q unreachable. algs.py opens with
-# "FIXME: improve random number generation", so this is known-rough ground.
-#
-# Sampling cost is negligible either way, so using a correct sampler here costs
-# nothing measurable and avoids building a known bias into the new arm. The
-# ElGamal path keeps its own sampler untouched -- fixing it would modify the
-# control arm, which the experiment forbids.
-
+# Util .py counterpart
 def random_lt(maximum, strong_random=random):
   """Uniform on [0, maximum). Correct rejection sampling."""
   n_bits = maximum.bit_length()
@@ -313,33 +174,6 @@ def random_z_star_n(n, strong_random=random):
     if v > 0 and math.gcd(v, n) == 1:
       return v
 
-
-# ---------------------------------------------------------------------------
-# Challenge generation (build spec 2.9)
-# ---------------------------------------------------------------------------
-#
-# This is where cross-language builds fail silently, so it is specified once,
-# implemented twice, and tested before either proof layer exists (milestone B1).
-# A mismatch in hash-input formatting means every ballot verifies locally in the
-# browser and every cast fails on the server, with the symptom far from the
-# cause.
-#
-# The JavaScript twin is Paillier.disjunctive_challenge_generator in
-# heliosbooth/js/jscrypto/paillier.js. Invariants that must hold in BOTH:
-#
-#   - Radix 10, no leading zeros, no sign. All values are positive.
-#   - Separator is one ASCII comma. No spaces, no trailing comma.
-#   - UTF-8 encoding of an ASCII-only string.
-#   - Canonicalise before stringifying: a reduced mod n^2, z mod n,
-#     e mod 2^160. Two implementations that disagree only about whether a value
-#     was reduced produce different hashes.
-#
-# t = 160 rather than 256: extraction requires 2^t < the smallest prime factor
-# of n, which at 1024-bit primes leaves ~864 bits of margin. Reusing Helios's
-# SHA-1 generator therefore satisfies the soundness bound AND holds the hash
-# function constant across both arms, removing a hashing-cost difference from
-# the comparison. (This supersedes IMPLEMENTATION_SPEC.md 2.2.2, which
-# specified SHA-256; masterplan decision 6.)
 
 CHALLENGE_BITS = 160
 CHALLENGE_MODULUS = 1 << CHALLENGE_BITS
@@ -390,8 +224,6 @@ class Paillier:
       raise ValueError("djn41_mode must be one of %s, not %r"
                        % (DJN41_MODES, djn41_mode))
     self.djn41_mode = djn41_mode
-
-  # --- surface models.generate_trustee reads (build spec 4.3) -------------
 
   # Which datatype a trustee public key of this scheme serializes as.
   public_key_datatype = 'paillier/PublicKey'
@@ -547,21 +379,6 @@ class PaillierPublicKey:
     return None
 
   def fixed_base_tables(self):
-    """
-    (T_hn, T_h), with T_hn[i] = hn^(2^i) mod n^2 and T_h[i] = h^(2^i) mod n.
-
-    DJN 4.2's cost claim assumes precomputed powers of the fixed base. These
-    are built on first use and cached on this key object, then shared by every
-    encryption and every witness under it.
-
-    They are sized for the longest exponent that can occur. One exponent is
-    below exponent_bound, but the overall proof's witness raises h to the SUM
-    of a question's exponents, so the tables reach TABLE_HEADROOM_BITS further.
-    A longer exponent falls back to pow() -- see _fixed_base_pow.
-
-    The cache is keyed on the parameters it was built from, so a key whose h or
-    hn is replaced rebuilds its tables rather than silently using the old base.
-    """
     if not self.uses_djn_41:
       raise Exception("fixed-base tables exist only under DJN 4.1")
 
@@ -583,32 +400,7 @@ class PaillierPublicKey:
     return _fixed_base_pow(self.h, self.fixed_base_tables()[1], exponent,
                            self.n)
 
-  # --- encryption (build spec 2.3) ---------------------------------------
-
   def encrypt_with_r(self, plaintext, r, encode_message=False):
-    """
-        Enc(m, v) = (1 + m*n) * v^n  mod n^2
-
-    The message component is ONE MULTIPLICATION, never an exponentiation. That
-    is the mandated (1+n)^m = 1+mn identity: since (1+n)^m expands to
-    1 + mn + C(m,2)n^2 + ... and every term from the third on carries n^2, the
-    whole tail vanishes mod n^2. Only v^n costs.
-
-    That is NOT a saving over ElGamal, whose message component is one
-    multiplication too. Helios never exponentiates g^m per encryption:
-    generate_plaintexts builds g^0, g^1, ... by a running product
-    (scheme_adapters._eg_generate_plaintexts), and encryption multiplies the
-    chosen one into y^r. The real cost gap is in the blinding:
-
-      Paillier   one exponentiation:  4096-bit modulus, 2048-bit exponent (v^n)
-      ElGamal    two exponentiations: 2048-bit modulus, 256-bit exponent
-                 (g^r and y^r, with r drawn from Z_q; Helios's q is 256 bits)
-
-    `encode_message` exists for signature parity with
-    EGPublicKey.encrypt_with_r, where it selects subgroup encoding. That has no
-    Paillier meaning -- Paillier encrypts 0 natively and needs no encoding -- so
-    it is accepted and refused rather than silently ignored.
-    """
     if encode_message:
       raise Exception(
         "encode_message has no meaning under Paillier: the plaintext is the "
@@ -631,21 +423,12 @@ class PaillierPublicKey:
   def encrypt_return_r(self, plaintext):
     """
     Encrypt and hand back the randomness, which the proofs need as witness.
-
-    Draws through random_randomness() rather than sampling Z*_n directly: under
-    DJN 4.1 the randomness is an EXPONENT from a mode-specific range, and
-    sampling a full-width base here would silently produce a
-    correct-but-unoptimized ciphertext -- self consistent, verifying, and
-    slower than the standard path it was meant to beat. Nothing would have
-    failed; the optimization simply would not have happened.
     """
     r = self.random_randomness()
     return [self.encrypt_with_r(plaintext, r), r]
 
   def encrypt(self, plaintext):
     return self.encrypt_return_r(plaintext)[0]
-
-  # --- trustee-key combination (build spec 4.6, enforcement point 1) ------
 
   def __mul__(self, other):
     """
@@ -672,8 +455,6 @@ class PaillierPublicKey:
       "Paillier trustee keys cannot be combined; threshold Paillier requires "
       "DKG, which is out of scope. See PAILLIER_BUILD_SPEC.md 4.6.")
 
-  # --- the scheme-dispatch interface homomorphic.py depends on ------------
-  #
   # Counterpart of helios/crypto/scheme_adapters.py's ElGamal side. Keeping
   # these on the public key is what lets workflows/homomorphic.py hold zero
   # references to any scheme.
@@ -702,19 +483,7 @@ class PaillierPublicKey:
 
   def combine_randomness(self, acc, r):
     """
-    How the overall proof's combined witness is accumulated.
-
-    Standard: MULTIPLICATIVE. V = prod(v_i) mod n is correct because
-    (prod v_i)^n = prod(v_i^n) mod n^2.
-
-    DJN 4.1: ADDITIVE, because the randomness is an exponent and
-    hn^r1 * hn^r2 = hn^(r1+r2). Note there is no modulus: reducing would require
-    ord(h), which divides lambda(n) and is secret. The sum outgrows a single
-    exponent only by log2 of the number of summands -- 222 slots add 8 bits --
-    which is what TABLE_HEADROOM_BITS covers.
-
-    So under 4.1 this coincides with ElGamal's additive form, which is a mild
-    simplification of the identical-pipeline story rather than a complication.
+    How the overall proof's combined witness is accumulated
     """
     if self.uses_djn_41:
       return acc + r
@@ -726,30 +495,11 @@ class PaillierPublicKey:
     return 0 if self.uses_djn_41 else 1
 
   def proof_witness(self, randomness):
-    """
-    The Pi_root witness v with u = v^n mod n^2, from the stored randomness.
-
-    Standard: the randomness IS the witness.
-    DJN 4.1: the randomness is an exponent a, and the witness is
-    v = h^a mod n, because v^n = h^(an) = hn^a (mod n^2). This is the step
-    that keeps the proof system unchanged. It uses the fixed-base table for h,
-    so it costs one multiplication mod n per set bit of a.
-    """
     if self.uses_djn_41:
       return self._h_pow(randomness)
     return randomness
 
   def tally_decoder(self, num_tallied):
-    """
-    Identity. There is no discrete-log stage to undo.
-
-    ElGamal returns DLogTable.lookup after a Theta(N) precompute; single-trustee
-    Paillier decryption already yields the plaintext, so the decoder is a
-    pass-through. Making that a visible seam rather than a hidden branch is the
-    point: the absence of the dlog stage is one of the structural differences
-    the study exists to characterise, and the harness reports it as an absent
-    metric rather than a zero.
-    """
     return lambda raw_value: raw_value
 
   @property
@@ -764,8 +514,6 @@ class PaillierPublicKey:
   @property
   def ciphertext_class(self):
     return PaillierCiphertext
-
-  # --- decryption-proof verification (build spec 2.8) --------------------
 
   def verify_decryption_proof(self, ciphertext, factor, proof,
                               challenge_generator=None):
@@ -828,9 +576,8 @@ class PaillierPublicKey:
     # substituted key here instead.
     if self.hn != pow(self.h, self.n, self.n2):
       raise Exception("hn != h^n mod n^2; ballot proofs would be unprovable.")
-
-  # --- serialization (build spec 5.3) ------------------------------------
-
+  
+  # SERIALIZATION
   def to_dict(self):
     # g is serialized even though it equals n+1: it costs nothing, mirrors
     # EGPublicKey's four redundant fields, and gives validate_pk_params
@@ -893,22 +640,7 @@ class PaillierSecretKey:
   def pk(self, value):
     self.public_key = value
 
-  # --- CRT precomputation (build spec 2.4) -------------------------------
-
-  # The CRT constants are derived state, and they are computed LAZILY rather
-  # than in __init__.
-  #
-  # The reason is the deserialization path: LDObject.loadDataFromDict builds a
-  # bare PaillierSecretKey() and then assigns p, q, lambda_ and mu one at a
-  # time, so a secret key reloaded from the database never passes through a
-  # constructor that has p and q available. Precomputing eagerly gave a key that
-  # worked in memory and raised AttributeError on h_p after a round-trip -- an
-  # error that only appears once the election is real.
-  #
-  # Cost is unchanged in the measured path: the constants are three modular
-  # inverses computed once per key on first use and cached, against ~52 ms per
-  # CRT decryption. The first decryption of a run carries them.
-
+  # CRT precomputation
   @property
   def h_p(self):
     if self._h_p is None:
@@ -933,28 +665,7 @@ class PaillierSecretKey:
       self._precompute_crt()
     return self._p2_inv_q2
 
-  # --- CRT exponentiation, available only to the factorization holder ------
-  #
-  # These accelerate the DECRYPTION PROOF, which is distinct from decryption
-  # itself (already CRT-accelerated in decrypt_factor). Masterplan 4.7:
-  # "Steps 3 and 4's commitment are both CRT-accelerable, since only the
-  # trustee runs them."
-  #
-  # Why this is worth having: of ~307 ms per answer slot in
-  # decryption_factor_and_proof, ~250 ms sat in exactly two exponentiations
-  # that the trustee -- and ONLY the trustee -- can split over p and q. Leaving
-  # them unaccelerated measured Paillier decryption at ~15x ElGamal where a
-  # fair implementation shows ~6x.
-  #
-  # That matters more than a typical optimization because of the exposure
-  # argument in masterplan 6.2: five of the six reported metrics are
-  # structurally immune to the "you under-optimized Paillier" objection,
-  # because the party doing the work does not hold the factorization. The
-  # voter cannot use CRT; the aggregating server cannot; a public verifier
-  # cannot. Decryption is the ONE metric where the objection has a real target,
-  # so it is the one place the implementation must not leave anything on the
-  # table.
-
+  # CRT exponentiation
   def crt_pow_n(self, base, exponent):
     """
     base^exponent mod n, via p and q.
@@ -991,24 +702,6 @@ class PaillierSecretKey:
   def _precompute_crt(self):
     """
     Precompute the per-key CRT constants.
-
-    The algorithm is Paillier (1999) 7, "Decryption using Chinese-remaindering",
-    which gives exactly these precomputations, and the m_p / m_q formulas used
-    in decrypt_factor:
-
-        h_p = L_p(g^(p-1) mod p^2)^-1 mod p,    L_p(u) = (u-1)/p
-        h_q = L_q(g^(q-1) mod q^2)^-1 mod q,    L_q(u) = (u-1)/q
-
-    Only the closed forms are specific to this implementation. With g = 1+n
-    each reduces to a single inverse:
-
-        h_p = (-q)^-1 mod p
-        h_q = (-p)^-1 mod q
-
-    because (1+pq)^(p-1) = 1 + (p-1)pq (mod p^2): every higher binomial term
-    carries (pq)^2, which is 0 mod p^2. Hence L_p(g^(p-1)) = (p-1)q = -q
-    (mod p). Test 13b computes h_p both ways and asserts equality, and test 14
-    checks the resulting decryption against phe.
     """
     p, q = self.p, self.q
     if p is None or q is None:
@@ -1021,15 +714,9 @@ class PaillierSecretKey:
     # For CRT exponentiation modulo n^2 = p^2 * q^2 (see crt_pow_n2).
     self._p2_inv_q2 = number.inverse((p * p) % (q * q), q * q)
 
-  # --- decryption (build spec 2.4) ---------------------------------------
-
   def decrypt_no_crt(self, ciphertext):
     """
         Dec(c) = L(c^lambda mod n^2) * mu  mod n
-
-    One exponentiation at a 4096-bit modulus with a 2048-bit exponent. Kept
-    alongside the CRT path as an ablation target (build spec B10): the
-    difference between the two is what CRT is worth, predicted ~3.9x.
     """
     n = self.public_key.n
     n2 = self.public_key.n2
@@ -1042,19 +729,7 @@ class PaillierSecretKey:
     """
         m_p = L_p(c^(p-1) mod p^2) * h_p  mod p
         m_q = L_q(c^(q-1) mod q^2) * h_q  mod q
-        m   = m_p + p * ((m_q - m_p) * p_inv mod q)          (Garner)
-
-    Paillier (1999) 7, "Decryption using Chinese-remaindering", gives m_p, m_q
-    and h_p, h_q (see _precompute_crt) and recombines with CRT(m_p, m_q); the
-    last line is that recombination, written as Garner's formula.
-
-    Two exponentiations at a 2048-bit modulus with 1024-bit exponents, replacing
-    one at 4096 bits with a 2048-bit exponent.
-
-    Valid because every tally satisfies m < n. CRT is available ONLY to the
-    party holding p and q -- not the voter, not the aggregating server, not a
-    public verifier -- which is why it affects exactly one of the six reported
-    metrics.
+        m   = m_p + p * ((m_q - m_p) * p_inv mod q)
     """
     p, q = self.p, self.q
     c = ciphertext.c if hasattr(ciphertext, 'c') else ciphertext
@@ -1065,22 +740,6 @@ class PaillierSecretKey:
     return m_p + p * (((m_q - m_p) * self.p_inv) % q)
 
   def decryption_factor(self, ciphertext):
-    """
-    THE SANCTIONED DIVERGENCE (masterplan 3.3).
-
-    ElGamal-Helios decrypts in two steps: each trustee publishes alpha^x, the
-    factors are combined, and DLogTable recovers the exponent. Single-trustee
-    Paillier yields m directly -- nothing to combine, no discrete log.
-
-    So the Paillier decryption factor IS the plaintext. This preserves Helios's
-    call graph exactly (helios_trustee_decrypt -> combine_decryptions ->
-    result), and Trustee.decryption_factors is already typed
-    arrayOf(arrayOf('core/BigInteger')), so it stores with no schema change.
-
-    It also makes the absence of the dlog step visible and measurable rather
-    than hidden in a branch -- and that absence is one of the structural
-    differences the study exists to characterise.
-    """
     return self.decrypt_factor(ciphertext)
 
   def decrypt(self, ciphertext, dec_factor=None, decode_m=False):
@@ -1089,31 +748,9 @@ class PaillierSecretKey:
       dec_factor = self.decryption_factor(ciphertext)
     return PaillierPlaintext(dec_factor, self.public_key)
 
-  # --- proof of correct decryption (build spec 2.8) ----------------------
-
   def decryption_factor_and_proof(self, ciphertext, challenge_generator=None):
     """
     Counterpart of EGSecretKey.decryption_factor_and_proof.
-
-        1.  u = c * (1 - m*n) mod n^2          now an n-th power
-        2.  d = n^-1 mod lambda                exists because gcd(n, lambda) = 1
-        3.  v = u^d mod n                      the randomness, recovered
-        4.  Pi_root on (u, v), Fiat-Shamir
-
-    Step 3 works because u = v^n (mod n) and v^(nd) = v^(1+k*lambda) = v (mod n)
-    by Carmichael's theorem.
-
-    This gives a publicly verifiable proof of correct decryption WITHOUT any
-    threshold machinery, and it is the concrete payoff of the single-trustee
-    scope: dropping DKG is what makes it tractable. That turns a scope
-    limitation into a design justification and should be recorded as such.
-
-    HASHES THE COMMITMENT ONLY, not the statement. That is weaker than best
-    practice, and it is exactly what Helios's ElGamal path does --
-    decryption_factor_and_proof passes only proof.commitment to
-    EG_fiatshamir_challenge_generator. Matching it keeps the two arms symmetric
-    in both cost and security posture; deviating would introduce an asymmetry
-    the thesis would then have to explain.
     """
     if challenge_generator is None:
       challenge_generator = paillier_fiatshamir_challenge_generator
@@ -1148,8 +785,6 @@ class PaillierSecretKey:
     m, proof = self.decryption_factor_and_proof(ciphertext)
     return m, proof.to_dict()
 
-  # --- trustee proof of knowledge (build spec 4.4) -----------------------
-
   def prove_sk(self, challenge_generator):
     """
     Returns None. Paillier generates no trustee proof of knowledge of the
@@ -1168,8 +803,6 @@ class PaillierSecretKey:
     verifies vacuously, which is worse than an absent one.
     """
     return None
-
-  # --- serialization ------------------------------------------------------
 
   def to_dict(self):
     return {
@@ -1236,10 +869,6 @@ class PaillierCiphertext:
   def __mul__(self, other):
     """
     Homomorphic addition:  Enc(m1) * Enc(m2) mod n^2 = Enc(m1 + m2).
-
-    The 0 and 1 identity cases mirror EGCiphertext.__mul__ exactly, and are the
-    reason homomorphic_sum can still be initialised to 0 in homomorphic.py
-    without a scheme branch.
     """
     if isinstance(other, int) and (other == 0 or other == 1):
       return self
@@ -1254,22 +883,9 @@ class PaillierCiphertext:
       return False
     return self.c == other.c
 
-  # --- ballot validity proofs (build spec 2.6, 2.7) ---------------------
-
   def _statement_for(self, plaintext):
     """
-    The Pi_root statement for "this ciphertext encrypts m_j":
-
-        u_j = c * (1+n)^(-m_j) mod n^2  =  c * (1 - m_j*n) mod n^2
-
-    ONE MULTIPLICATION, never an exponentiation, because
-    (1 + j*n)(1 - j*n) = 1 - j^2 n^2 = 1 (mod n^2), so (1+n)^(-j) = 1 - j*n.
-
-    Exactly one u_j over the candidate plaintexts is an n-th power -- the one
-    matching the encrypted message -- with the encryption randomness as witness,
-    since Enc(m, v) * (1+n)^(-m) = v^n. That equivalence is why Pi_root is the
-    right base protocol: proving c encrypts m_j IS proving c*(1 - m_j n) is an
-    n-th power.
+    Statement for "this ciphertext encrypts m_j":
     """
     n, n2 = self.pk.n, self.pk.n2
     m = plaintext.m if hasattr(plaintext, 'm') else plaintext
@@ -1291,19 +907,6 @@ class PaillierCiphertext:
                                             randomness, challenge_generator):
     """
     CDS 1-out-of-L composition over L instances of Pi_root.
-
-    This mirrors EGCiphertext.generate_disjunctive_encryption_proof step for
-    step, including the real_challenge_generator closure that plants the real
-    commitment, hashes all commitments, then subtracts the simulated challenges.
-    Keeping that structure is what lets the call sites in homomorphic.py stay
-    scheme-agnostic. The only substantive difference is that Helios reduces the
-    real challenge % pk.q and this reduces % 2^160.
-
-    Cite Cramer-Damgard-Schoenmakers 1994 for the general L-way form, not DJN,
-    which gives 1-out-of-2 only. Q1 of the 2025 NLE face needs L = 13.
-
-    The proof list is built BY INDEX, never by appending, so the real branch's
-    position is not inferable from anything but the (indistinguishable) values.
     """
     proofs = [None for _ in plaintexts]
 
@@ -1359,15 +962,6 @@ class PaillierCiphertext:
             (sum([p.challenge for p in proof.proofs]) % CHALLENGE_MODULUS))
 
   def decrypt(self, decryption_factors, public_key):
-    """
-    Single trustee (build spec 4.6, enforcement point 4).
-
-    combine_decryptions (models.py:519-528) always passes a LIST of per-trustee
-    factor sets. Returning decryption_factors[0] silently would produce a
-    plausible-looking but wrong result if a second trustee ever existed -- which
-    is exactly the failure mode that reaches a results chapter unnoticed. So it
-    asserts instead.
-    """
     if len(decryption_factors) != 1:
       raise NotImplementedError(
         "Paillier elections support exactly one trustee, got %s decryption "
@@ -1400,10 +994,6 @@ class PaillierCiphertext:
   def from_string(cls, s):
     return cls.from_dict({'c': s})
 
-
-# ---------------------------------------------------------------------------
-# Pi_root — proof of knowledge of an n-th root (build spec 2.5)
-# ---------------------------------------------------------------------------
 
 class PaillierZKProof:
   """
@@ -1575,23 +1165,7 @@ class PaillierZKDisjunctiveProof:
 
 def extract_witness(u, pk, transcript_a, e1, z1, e2, z2):
   """
-  Special-soundness extraction (build spec 2.5, test 10).
-
-  From two accepting transcripts (a, e1, z1) and (a, e2, z2) with e1 != e2:
-
-      d = e1 - e2
-      since 0 < |d| < 2^160 < min(p, q), gcd(d, n) = 1, so extended-gcd gives
-      alpha, beta with alpha*d + beta*n = 1, and
-
-      v = (z1 * z2^-1)^alpha * u^beta  mod n
-
-  satisfies v^n = u (mod n^2), because
-  ((z1/z2)^alpha u^beta)^n = (u^d)^alpha u^(beta n) = u^(alpha d + beta n) = u.
-
-  This is what makes the proof a proof of KNOWLEDGE rather than merely a
-  convincing transcript, and the reason t = 160 is sound at 1024-bit primes:
-  extraction needs 2^t below the smallest prime factor of n, leaving ~864 bits
-  of margin.
+  Special-soundness extraction
   """
   n = pk.n
   d = e1 - e2

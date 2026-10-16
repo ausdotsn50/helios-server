@@ -21,14 +21,6 @@ from .view_utils import render_template_raw
 @shared_task
 def cast_vote_verify_and_store(cast_vote_id, status_update_message=None, **kwargs):
     cast_vote = CastVote.objects.get(id=cast_vote_id)
-    # Proof verification, in the process that actually performs it: the
-    # Celery worker, at cast time. One record per ballot.
-    #
-    # NOT cast_vote.vote.election: CastVote.vote is an EncryptedVote LDObject,
-    # which carries election_uuid but gets .election only from init_election(),
-    # never called on this path. Reading it raises, and because the expression
-    # is evaluated in the argument list it escapes span's own guard and fails
-    # the cast. Use the same path the code below already uses.
     with measure.span(cast_vote.voter.election.uuid, 'verification_time_ns',
                       cast_vote_id=cast_vote_id):
         result = cast_vote.verify_and_store()
