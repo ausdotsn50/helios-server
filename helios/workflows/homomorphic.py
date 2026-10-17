@@ -272,7 +272,7 @@ class Tally(WorkflowObject):
 
     if election:
       self.init_election(election)
-      self.tally = [[0 for a in q['answers']] for q in self.questions]
+      self.tally = [[0 for a in q['answers']] for q in self.questions] # Placholder only, replaced by ciphertext object
     else:
       self.questions = None
       self.public_key = None
@@ -310,6 +310,8 @@ class Tally(WorkflowObject):
         # do the homomorphic addition into the tally
         enc_vote_choice = encrypted_vote.encrypted_answers[question_num].choices[answer_num]
         enc_vote_choice.pk = self.public_key
+        # This slot's tally cell = this ballot's ciphertext for the slot × the cell so far
+        # (first ballot replaces the 0). Multiplying ciphertexts adds the hidden votes.
         self.tally[question_num][answer_num] = encrypted_vote.encrypted_answers[question_num].choices[answer_num] * self.tally[question_num][answer_num]
 
     self.num_tallied += 1
@@ -318,10 +320,6 @@ class Tally(WorkflowObject):
     """
     returns an array of decryption factors and a corresponding array of decryption proofs.
     makes the decryption factors into strings, for general Helios / JS compatibility.
-
-    election_uuid is measurement-only and defaults to None, which keeps the
-    signature backward-compatible and makes the spans no-ops for any caller
-    that does not pass it.
     """
     measuring = measure.enabled()
 

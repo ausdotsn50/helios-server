@@ -15,9 +15,4 @@ class Migration(migrations.Migration):
             name='paillier_use_crt_proofs',
             field=models.BooleanField(default=True),
         ),
-        migrations.AddField(
-            model_name='election',
-            name='paillier_use_djn41',
-            field=models.BooleanField(default=False),
-        ),
     ]

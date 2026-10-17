@@ -3,10 +3,8 @@ Paillier cryptosystem for the Helios Voting System.
 """
 
 import math
-import secrets
 
 from Crypto.Hash import SHA1
-from Crypto.Math import Primality
 from Crypto.Util import number
 
 from helios.crypto.utils import random
@@ -18,119 +16,6 @@ DEFAULT_KEY_SIZE = 1024
 # Minimum modulus width accepted by validate_pk_params. Tests construct keys far
 # below this deliberately and never route them through validation.
 MIN_MODULUS_BITS = 2048
-DJN41_MODES = ('off', 'short', 'long')
-TABLE_HEADROOM_BITS = 16
-
-
-def check_djn41_primes(p, q):
-  """
-  Raise ValueError unless (p, q) meet DJN 4.1's conditions on the modulus
-  """
-  if p == q:
-    raise ValueError("DJN 4.1: p and q must be distinct")
-  for name, prime in (('p', p), ('q', q)):
-    if prime % 4 != 3:
-      raise ValueError("DJN 4.1: %s must be 3 mod 4" % name)
-    if not number.isPrime(prime):
-      raise ValueError("DJN 4.1: %s is not prime" % name)
-    if not number.isPrime((prime - 1) // 2):
-      raise ValueError("DJN 4.1: %s is not a safe prime -- (%s-1)/2 is not "
-                       "prime" % (name, name))
-  if math.gcd(p - 1, q - 1) != 2:
-    raise ValueError("DJN 4.1: gcd(p-1, q-1) must be 2")
-
-
-def _odd_primes_up_to(bound):
-  """The odd primes <= bound, by the sieve of Eratosthenes."""
-  sieve = bytearray([1]) * (bound + 1)
-  sieve[0:2] = b'\x00\x00'
-  for i in range(2, math.isqrt(bound) + 1):
-    if sieve[i]:
-      sieve[i * i::i] = bytes(len(range(i * i, bound + 1, i)))
-  return tuple(i for i in range(3, bound + 1, 2) if sieve[i])
-
-
-_SIEVE_BOUND = 1 << 12
-_SIEVE_PRIMES = _odd_primes_up_to(_SIEVE_BOUND)
-_SIEVE_PRODUCT = math.prod(_SIEVE_PRIMES)
-
-def generate_safe_prime(bits):
-  return _generate_safe_prime(bits, _SIEVE_BOUND, _SIEVE_PRODUCT)
-
-
-def _generate_safe_prime(bits, sieve_bound, sieve_product):
-  """generate_safe_prime, with the sieve as a parameter so it can be tuned."""
-  min_p = math.isqrt(1 << (2 * bits - 1)) + 1     # > sqrt(2) * 2^(bits-1)
-
-  # p' = 6k + 5, so p = 2p' + 1 = 12k + 11, and p in [min_p, 2^bits).
-  k_lo = -(-(min_p - 11) // 12)
-  k_hi = ((1 << bits) - 12) // 12
-  if k_hi < k_lo or 6 * k_lo + 5 <= sieve_bound:
-    raise ValueError("%d bits is too small for a safe prime above the sieve "
-                     "bound %d" % (bits, sieve_bound))
-
-  while True:
-    p_prime = 6 * (k_lo + secrets.randbelow(k_hi - k_lo + 1)) + 5
-    p = 2 * p_prime + 1
-
-    if math.gcd(p_prime * p, sieve_product) != 1:
-      continue
-    if pow(2, p - 1, p) != 1:
-      continue
-    if (Primality.test_probable_prime(p_prime) == Primality.PROBABLY_PRIME
-        and Primality.test_probable_prime(p) == Primality.PROBABLY_PRIME):
-      return p
-
-
-def djn41_fields_from_dict(d):
-  """
-  The DJN 4.1 fields of a serialized public key, as constructor arguments.
-  """
-  mode = d.get('djn41_mode', 'off')
-  if mode not in DJN41_MODES:
-    raise Exception("djn41_mode must be one of %s, not %r" % (DJN41_MODES, mode))
-
-  if mode == 'off':
-    if any(d.get(f) is not None for f in ('h', 'hn', 'g_prime')):
-      raise Exception("DJN 4.1 parameters without a djn41_mode: this is the "
-                      "retired (h, g_prime) key format, which is no longer "
-                      "supported")
-    return {'djn41_mode': 'off', 'h': None, 'hn': None}
-
-  if d.get('h') is None or d.get('hn') is None:
-    raise Exception("a %r DJN 4.1 key must carry h and hn" % mode)
-  return {'djn41_mode': mode, 'h': int(d['h']), 'hn': int(d['hn'])}
-
-
-# ---------------------------------------------------------------------------
-# Fixed-base exponentiation (DJN 4.2)
-# ---------------------------------------------------------------------------
-
-def _fixed_base_table(base, modulus, bits):
-  """[base^(2^i) mod modulus for i in range(bits)], by repeated squaring."""
-  table = [base % modulus]
-  for _ in range(bits - 1):
-    table.append(table[-1] * table[-1] % modulus)
-  return table
-
-
-def _fixed_base_pow(base, table, exponent, modulus):
-  """
-  base^exponent mod modulus, from table[i] = base^(2^i) mod modulus.
-
-  One modular multiplication per set bit of the exponent and no squarings --
-  those were paid once, when the table was built. Identical to
-  pow(base, exponent, modulus) for every exponent; one the table cannot cover
-  (negative, or longer than the table) simply takes pow().
-  """
-  if exponent < 0 or exponent.bit_length() > len(table):
-    return pow(base, exponent, modulus)
-
-  result = 1
-  for i, bit in enumerate(reversed(bin(exponent)[2:])):
-    if bit == '1':
-      result = result * table[i] % modulus
-  return result
 
 
 # Util .py counterpart
@@ -193,20 +78,8 @@ class Paillier:
   Counterpart of elgamal.Cryptosystem.
   """
 
-  def __init__(self, key_size=DEFAULT_KEY_SIZE, djn41_mode='off'):
+  def __init__(self, key_size=DEFAULT_KEY_SIZE):
     self.key_size = key_size
-
-    # Which encryption function generated keys use: 'off', 'short' or 'long'
-    # (see DJN41_MODES above).
-    #
-    # Default 'off'. The standard encryption function is the one test 14
-    # cross-checks against the external `phe` oracle, and 'short' widens the
-    # security assumption. Either DJN mode also changes key generation, to
-    # safe primes.
-    if djn41_mode not in DJN41_MODES:
-      raise ValueError("djn41_mode must be one of %s, not %r"
-                       % (DJN41_MODES, djn41_mode))
-    self.djn41_mode = djn41_mode
 
   # Which datatype a trustee public key of this scheme serializes as.
   public_key_datatype = 'paillier/PublicKey'
@@ -217,17 +90,15 @@ class Paillier:
 
   def generate_keypair(self):
     keypair = PaillierKeyPair()
-    keypair.generate(self.key_size, djn41_mode=self.djn41_mode)
+    keypair.generate(self.key_size)
     return keypair
 
   def toJSONDict(self):
-    return {'key_size': str(self.key_size),
-            'djn41_mode': self.djn41_mode}
+    return {'key_size': str(self.key_size)}
 
   @classmethod
   def fromJSONDict(cls, d):
-    return cls(key_size=int(d['key_size']),
-               djn41_mode=d.get('djn41_mode', 'off'))
+    return cls(key_size=int(d['key_size']))
 
 
 class PaillierKeyPair:
@@ -237,7 +108,7 @@ class PaillierKeyPair:
     self.pk = PaillierPublicKey()
     self.sk = PaillierSecretKey()
 
-  def generate(self, key_size=DEFAULT_KEY_SIZE, djn41_mode='off'):
+  def generate(self, key_size=DEFAULT_KEY_SIZE):
     """
     Build a keypair
 
@@ -247,13 +118,9 @@ class PaillierKeyPair:
         lambda=  lcm(p-1, q-1)
         mu    =  lambda^-1 mod n
     """
-    if djn41_mode == 'off':
-      def new_prime():
-        # Return a random strong N-bit prime number. In this context, p is a strong prime if p-1 and p+1 have at least one large prime factor.
-        return number.getStrongPrime(key_size) # From pycryptodome library
-    else:
-      def new_prime():
-        return generate_safe_prime(key_size)
+    def new_prime():
+      # Return a random strong N-bit prime number. In this context, p is a strong prime if p-1 and p+1 have at least one large prime factor.
+      return number.getStrongPrime(key_size) # From pycryptodome library
 
     # getStrongPrime ensures equal bit length, passes gcd check
     p = new_prime()
@@ -261,36 +128,15 @@ class PaillierKeyPair:
     while q == p:
       q = new_prime()
 
-    self._assign(p, q, djn41_mode=djn41_mode)
+    self._assign(p, q)
     return self
 
-  def _assign(self, p, q, djn41_mode='off'):
+  def _assign(self, p, q):
     """Shared by generate() and the fixed-prime construction used in tests."""
-    if djn41_mode not in DJN41_MODES:
-      raise ValueError("djn41_mode must be one of %s, not %r"
-                       % (DJN41_MODES, djn41_mode))
-    if djn41_mode != 'off':
-      check_djn41_primes(p, q)
-
-    # Proceed here if DJN off
     n = p * q
 
     self.pk.n = n
     self.pk.g = n + 1
-    self.pk.djn41_mode = djn41_mode
-
-    if djn41_mode != 'off':
-      # DJN 4.1's fixed base, h = -x^2 mod n. -1 is a non-square of Jacobi
-      # symbol +1 because p = q = 3 (mod 4), so h has Jacobi symbol +1 and,
-      # except with negligible probability, generates that whole group.
-      # Encryption raises hn = h^n mod n^2; the voter raises h itself to get
-      # the Pi_root witness. Both are public.
-      #
-      # hn costs one (4096-bit modulus, 2048-bit exponent) exponentiation at
-      # key generation, paid once per election.
-      x = random_z_star_n(n)
-      self.pk.h = (-x * x) % n
-      self.pk.hn = pow(self.pk.h, n, n * n)
 
     self.sk.p = p
     self.sk.q = q
@@ -301,18 +147,16 @@ class PaillierKeyPair:
     return self
 
   @classmethod
-  def from_primes(cls, p, q, djn41_mode='off'):
+  def from_primes(cls, p, q):
     """
     Construct from fixed primes.
 
-    Used by the test suite -- for small keys that keep the suite fast, for the
-    fixed safe primes the DJN 4.1 tests share, and for the deterministic
-    (p, q, m, v) vectors checked against the external oracle in test 14. In
-    either DJN mode the primes must meet 4.1's conditions, and ordinary primes
-    raise ValueError (see check_djn41_primes).
+    Used by the test suite -- for small keys that keep the suite fast, and for
+    the deterministic (p, q, m, v) vectors checked against the external oracle
+    in test 14.
     """
     kp = cls()
-    return kp._assign(p, q, djn41_mode=djn41_mode)
+    return kp._assign(p, q)
 
 
 class PaillierPublicKey:
@@ -326,62 +170,14 @@ class PaillierPublicKey:
   # Shared tally code with ElGamal (specify)
   has_dlog = False
 
-  def __init__(self, n=None, g=None, h=None, hn=None, djn41_mode='off'):
+  def __init__(self, n=None, g=None):
     self.n = n
     self.g = g
-
-    # DJN mode parameters
-    self.djn41_mode = djn41_mode
-    self.h = h        # -x^2 mod n
-    self.hn = hn      # h^n mod n^2
-
-    # (parameters, T_hn, T_h), built on first use; see fixed_base_tables.
-    self._tables = None
 
   @property
   def n2(self):
     """Derived, never serialized."""
     return self.n * self.n
-
-  @property
-  def uses_djn_41(self):
-    """True under either DJN 4.1 mode, 'short' or 'long'."""
-    return self.djn41_mode != 'off'
-
-  @property
-  def exponent_bound(self):
-    """
-    Exclusive upper bound on one DJN 4.1 encryption exponent:
-    2^ceil(k/2) under 'short', where k = |n|, and n // 2 under 'long'. None on
-    a standard key, whose randomness is a base rather than an exponent.
-    """
-    if self.djn41_mode == 'short':
-      return 1 << ((self.n.bit_length() + 1) // 2)
-    if self.djn41_mode == 'long':
-      return self.n // 2
-    return None
-
-  def fixed_base_tables(self):
-    if not self.uses_djn_41:
-      raise Exception("fixed-base tables exist only under DJN 4.1")
-
-    params = (self.djn41_mode, self.n, self.h, self.hn)
-    if self._tables is None or self._tables[0] != params:
-      bits = self.exponent_bound.bit_length() + TABLE_HEADROOM_BITS
-      self._tables = (params,
-                      _fixed_base_table(self.hn, self.n2, bits),
-                      _fixed_base_table(self.h, self.n, bits))
-    return self._tables[1], self._tables[2]
-
-  def _hn_pow(self, exponent):
-    """hn^exponent mod n^2, from the fixed-base table."""
-    return _fixed_base_pow(self.hn, self.fixed_base_tables()[0], exponent,
-                           self.n2)
-
-  def _h_pow(self, exponent):
-    """h^exponent mod n, from the fixed-base table."""
-    return _fixed_base_pow(self.h, self.fixed_base_tables()[1], exponent,
-                           self.n)
 
   def encrypt_with_r(self, plaintext, r, encode_message=False):
     if encode_message:
@@ -393,13 +189,7 @@ class PaillierPublicKey:
     m = plaintext.m if hasattr(plaintext, 'm') else plaintext
     n, n2 = self.n, self.n2
 
-    if self.uses_djn_41:
-      # DJN 4.1: r is an EXPONENT against the fixed base hn, not a base raised
-      # to n. From the fixed-base table that is one multiplication mod n^2 per
-      # set bit of r, and no squarings.
-      blinding = self._hn_pow(r)
-    else:
-      blinding = pow(r, n, n2)
+    blinding = pow(r, n, n2)
 
     return PaillierCiphertext(((1 + m * n) * blinding) % n2, self)
 
@@ -435,27 +225,18 @@ class PaillierPublicKey:
     """
     Fresh encryption randomness
     """
-    if self.uses_djn_41:
-      return random_lt(self.exponent_bound)
     return random_z_star_n(self.n)
 
   def combine_randomness(self, acc, r):
     """
     How the overall proof's combined witness is accumulated
     """
-    if self.uses_djn_41:
-      return acc + r
     return (acc * r) % self.n
 
   @property
   def randomness_identity(self):
-    """Multiplicative 1 for the standard path, additive 0 under 4.1."""
-    return 0 if self.uses_djn_41 else 1
-
-  def proof_witness(self, randomness):
-    if self.uses_djn_41:
-      return self._h_pow(randomness)
-    return randomness
+    """Multiplicative 1 for the standard path."""
+    return 1
 
   def tally_decoder(self, num_tallied):
     return lambda raw_value: raw_value
@@ -513,48 +294,18 @@ class PaillierPublicKey:
     if number.isPrime(self.n):
       raise Exception("n must be composite.")
 
-    if self.djn41_mode not in DJN41_MODES:
-      raise Exception("djn41_mode must be one of %s." % (DJN41_MODES,))
-
-    if not self.uses_djn_41:
-      if self.h is not None or self.hn is not None:
-        raise Exception("h and hn are DJN 4.1 parameters; a standard key "
-                        "must not carry them.")
-      return
-
-    if self.h is None or self.hn is None:
-      raise Exception("a DJN 4.1 key must carry h and hn.")
-    if not (0 < self.h < self.n):
-      raise Exception("h out of range; it must be in Z*_n.")
-    if math.gcd(self.h, self.n) != 1:
-      raise Exception("h is not a unit mod n.")
-    # hn must be exactly h^n, or hn^a has no n-th root the voter can compute
-    # and every ballot proof is unprovable -- discovered only at proving time.
-    # One exponentiation, cheap next to key generation, catches a malformed or
-    # substituted key here instead.
-    if self.hn != pow(self.h, self.n, self.n2):
-      raise Exception("hn != h^n mod n^2; ballot proofs would be unprovable.")
-  
   # SERIALIZATION
   def to_dict(self):
     # g is serialized even though it equals n+1: it costs nothing, mirrors
     # EGPublicKey's four redundant fields, and gives validate_pk_params
     # something to check.
-    #
-    # h, hn and djn41_mode appear ONLY on a DJN 4.1 key, so a standard key
-    # serializes exactly as it did before 4.1 existed: {n, g}.
-    d = {'n': str(self.n), 'g': str(self.g)}
-    if self.uses_djn_41:
-      d['h'] = str(self.h)
-      d['hn'] = str(self.hn)
-      d['djn41_mode'] = self.djn41_mode
-    return d
+    return {'n': str(self.n), 'g': str(self.g)}
 
   toJSONDict = to_dict
 
   @classmethod
   def from_dict(cls, d):
-    pk = cls(n=int(d['n']), g=int(d['g']), **djn41_fields_from_dict(d))
+    pk = cls(n=int(d['n']), g=int(d['g']))
     pk.validate_pk_params()
     return pk
 
@@ -563,9 +314,7 @@ class PaillierPublicKey:
   def __eq__(self, other):
     if other is None or not isinstance(other, PaillierPublicKey):
       return False
-    return (self.n == other.n and self.g == other.g
-            and self.djn41_mode == other.djn41_mode
-            and self.h == other.h and self.hn == other.hn)
+    return self.n == other.n and self.g == other.g
 
   def __ne__(self, other):
     return not self.__eq__(other)
@@ -695,6 +444,8 @@ class PaillierSecretKey:
     m_p = ((pow(c, p - 1, p * p) - 1) // p * self.h_p) % p
     m_q = ((pow(c, q - 1, q * q) - 1) // q * self.h_q) % q
 
+    # Garner's Formula to return factor=m
+    # https://www.johndcook.com/blog/2023/09/14/garners-algorithm/
     return m_p + p * (((m_q - m_p) * self.p_inv) % q)
 
   def decryption_factor(self, ciphertext):
@@ -850,11 +601,8 @@ class PaillierCiphertext:
     return (self.c * (1 - m * n)) % n2
 
   def generate_encryption_proof(self, plaintext, randomness, challenge_generator):
-    # The stored randomness is the Pi_root witness under the standard scheme,
-    # and an exponent under DJN 4.1 -- pk.proof_witness resolves the two.
-    # Everything downstream of this line is identical in both modes.
     return PaillierZKProof.generate(
-      self._statement_for(plaintext), self.pk.proof_witness(randomness),
+      self._statement_for(plaintext), randomness,
       self.pk, challenge_generator)
 
   def simulate_encryption_proof(self, plaintext, challenge=None):

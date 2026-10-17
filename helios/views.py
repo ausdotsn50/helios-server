@@ -68,8 +68,7 @@ def crypto_params_for(election):
 
   if scheme == 'paillier':
     return paillier.Paillier(
-      key_size=PAILLIER_PARAMS.key_size,
-      djn41_mode=getattr(election, 'paillier_djn41_mode', 'off'))
+      key_size=PAILLIER_PARAMS.key_size)
 
   try:
     return CRYPTO_PARAMS[scheme]
@@ -1232,7 +1231,6 @@ def one_election_copy(request, election):
     # without this a copied Paillier election would silently become ElGamal,
     # or would quietly change optimization level
     crypto_scheme = election.crypto_scheme,
-    paillier_djn41_mode = election.paillier_djn41_mode,
     paillier_use_crt_proofs = election.paillier_use_crt_proofs,
     short_name = new_short_name,
     name = "Copy of " + election.name,

@@ -10,27 +10,16 @@ var Paillier = {};
 // Constants
 Paillier.CHALLENGE_BITS = 160;
 Paillier.CHALLENGE_MODULUS = BigInt.ONE.shiftLeft(160);
-Paillier.DJN41_MODES = ['off', 'short', 'long'];
-Paillier.TABLE_HEADROOM_BITS = 16;
 
 Paillier.PublicKey = Class.extend({
-  init: function(n, g, h, hn, djn41_mode) {
+  init: function(n, g) {
     this.n = n;
     this.g = g;          // == n+1, carried explicitly to mirror EGPublicKey
     this.n2 = n.multiply(n);
-    this.djn41_mode = djn41_mode || 'off';
-    this.h = h || null;      // -x^2 mod n
-    this.hn = hn || null;    // h^n mod n^2
-    this.tables = null;      // built on first use; see fixedBaseTables
   },
 
   toJSONObject: function() {
     var d = {n: this.n.toJSONObject(), g: this.g.toJSONObject()};
-    if (this.usesDJN41()) {
-      d.h = this.h.toJSONObject();
-      d.hn = this.hn.toJSONObject();
-      d.djn41_mode = this.djn41_mode;
-    }
     return d;
   },
 
@@ -41,59 +30,10 @@ Paillier.PublicKey = Class.extend({
     }
     var one_plus_mn = BigInt.ONE.add(plaintext.m.multiply(this.n)).mod(this.n2);
 
-    // DJN 4.1: r is an EXPONENT against the fixed base hn, raised from the
-    // fixed-base table -- one multiplication mod n^2 per set bit of r, and no
-    // squarings.
-    var blinding = this.usesDJN41()
-        ? Paillier.fixedBasePow(this.hn, this.fixedBaseTables().hn, r, this.n2)
-        : r.modPow(this.n, this.n2); // modPow: base, exp, mod
+    var blinding = r.modPow(this.n, this.n2); // modPow: base, exp, mod
 
     return new Paillier.Ciphertext(one_plus_mn.multiply(blinding).mod(this.n2),
                                    this);
-  },
-
-  // DJN 4.1
-  usesDJN41: function() {
-    return this.djn41_mode != 'off';
-  },
-
-  // Exclusive upper bound on one DJN 4.1 exponent: 2^ceil(k/2) under 'short',
-  // where k = |n|, and n // 2 under 'long'.
-  exponentBound: function() {
-    if (this.djn41_mode == 'short')
-      return BigInt.ONE.shiftLeft(Math.ceil(this.n.bitLength() / 2)); // 1 shift left in k/2 places
-    if (this.djn41_mode == 'long')
-      return this.n.shiftRight(1);
-    return null;
-  },
-
-  // {hn: [hn^(2^i) mod n^2], h: [h^(2^i) mod n]}, built on the first
-  // encryption under this key and cached on it, so every later encryption and
-  // witness reuses them. DJN 4.2's cost claim assumes exactly this
-  // precomputation. Sized like the Python side's: one exponent's bound plus
-  // TABLE_HEADROOM_BITS, and anything longer falls back to modPow.
-  fixedBaseTables: function() {
-    if (this.tables == null) {
-      var bits = this.exponentBound().bitLength() +
-                 Paillier.TABLE_HEADROOM_BITS;
-      this.tables = {
-        hn: Paillier.fixedBaseTable(this.hn, this.n2, bits),
-        h: Paillier.fixedBaseTable(this.h, this.n, bits)
-      };
-    }
-    return this.tables;
-  },
-
-  // The witness v with u = v^n mod n^2, derived from the stored randomness.
-  // Standard: the randomness IS the witness. 
-  proofWitness: function(randomness) {
-    if (!this.usesDJN41())
-      return randomness;
-
-    // DJN 4.1: the randomness is an exponent a and the witness is h^a mod n, because
-    // (h^a)^n = hn^a (mod n^2). 
-    return Paillier.fixedBasePow(this.h, this.fixedBaseTables().h, randomness,
-                                 this.n);
   },
 
   // --- the scheme-dispatch interface helios.js uses ------------------------
@@ -124,25 +64,17 @@ Paillier.PublicKey = Class.extend({
   },
 
   randomRandomness: function() {
-    if (this.usesDJN41()) {
-      // An exponent, not an element of Z*_n: uniform on [0, exponentBound()).
-      return Random.getRandomInteger(this.exponentBound());
-    }
-
     return this.randomZStarN();
   },
 
   // Standard: V = prod(v_i) mod n is the correct combined
   // witness because (prod v_i)^n = prod(v_i^n) mod n^2.
   combineRandomness: function(acc, r) {
-    if (this.usesDJN41())
-      return acc.add(r);
-
     return acc.multiply(r).mod(this.n);
   },
 
   randomnessIdentity: function() {
-    return this.usesDJN41() ? BigInt.ZERO : BigInt.ONE;
+    return BigInt.ONE;
   },
 
   disjunctiveChallengeGenerator: function() {
@@ -150,32 +82,9 @@ Paillier.PublicKey = Class.extend({
   }
 });
 
-// Parses the DJN 4.1 fields as djn41_fields_from_dict does in
-// helios/crypto/paillier.py -- including refusing the retired (h, g_prime)
-// format rather than reading it as a standard key, which would quietly run a
-// 'short' election as 'off'.
 Paillier.PublicKey.fromJSONObject = function(d) {
-  var mode = d.djn41_mode || 'off';
-  if (!_(Paillier.DJN41_MODES).include(mode))
-    throw "unknown djn41_mode: " + mode;
-
-  if (mode == 'off') {
-    if (d.h != null || d.hn != null || d.g_prime != null)
-      throw "DJN 4.1 parameters without a djn41_mode: the retired " +
-            "(h, g_prime) key format is no longer supported";
-    return new Paillier.PublicKey(BigInt.fromJSONObject(d.n),
-                                  BigInt.fromJSONObject(d.g));
-  }
-
-  if (d.h == null || d.hn == null)
-    throw "a " + mode + " DJN 4.1 key must carry h and hn";
-
-  return new Paillier.PublicKey(
-      BigInt.fromJSONObject(d.n),
-      BigInt.fromJSONObject(d.g),
-      BigInt.fromJSONObject(d.h),
-      BigInt.fromJSONObject(d.hn),
-      mode);
+  return new Paillier.PublicKey(BigInt.fromJSONObject(d.n),
+                                BigInt.fromJSONObject(d.g));
 };
 
 // Paillier Ciphertext obj
@@ -208,7 +117,7 @@ Paillier.Ciphertext = Class.extend({
 
   generateProof: function(plaintext, randomness, challenge_generator) {
     return Paillier.Proof.generate(this.statementFor(plaintext),
-                                   this.pk.proofWitness(randomness),
+                                   randomness,
                                    this.pk, challenge_generator);
   },
 
@@ -449,35 +358,6 @@ Paillier.DisjunctiveProof.fromJSONObject = function(d) {
 // Module-level convenience mirroring ElGamal.encrypt(pk, plaintext, r).
 Paillier.encrypt = function(pk, plaintext, r) {
   return pk.encrypt(plaintext, r);
-};
-
-
-
-// DJN 4.1 fixed-base exponentiation
-// [base^(2^i) mod modulus for i < bits], by repeated squaring.
-Paillier.fixedBaseTable = function(base, modulus, bits) {
-  var table = [base.mod(modulus)];
-  for (var i = 1; i < bits; i++) {
-    table.push(table[i - 1].multiply(table[i - 1]).mod(modulus));
-  }
-  return table;
-};
-
-// base^exponent mod modulus from table[i] = base^(2^i) mod modulus: one
-// multiplication per set bit of the exponent, and no squarings -- those were
-// paid once, when the table was built. Identical to modPow for every exponent;
-// one the table cannot cover (negative, or too long) simply takes modPow.
-Paillier.fixedBasePow = function(base, table, exponent, modulus) {
-  var bits = exponent.bitLength();
-  if (exponent.signum() < 0 || bits > table.length)
-    return base.modPow(exponent, modulus);
-
-  var result = BigInt.ONE;
-  for (var i = 0; i < bits; i++) {
-    if (exponent.testBit(i))
-      result = result.multiply(table[i]).mod(modulus);
-  }
-  return result;
 };
 
 

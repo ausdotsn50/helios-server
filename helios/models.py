@@ -75,17 +75,6 @@ class Election(HeliosModel):
 
   crypto_scheme = models.CharField(max_length=20, null=False, default='elgamal',
                                    choices=CRYPTO_SCHEMES)
-  
-  # tba: explored modes for Paillier encryption
-  PAILLIER_DJN41_MODES = (
-    ('off', 'Off (standard Paillier)'),
-    ('short', 'DJN 4.1, short exponent'),
-    ('long', 'DJN 4.1, long exponent'),
-    )
-
-  paillier_djn41_mode = models.CharField(max_length=10, null=False,
-                                         default='off',
-                                         choices=PAILLIER_DJN41_MODES)
 
   # CRT acceleration of the dec. proof for Paillier
   paillier_use_crt_proofs = models.BooleanField(default=True, null=False)
@@ -103,7 +92,6 @@ class Election(HeliosModel):
       return {}
 
     return {
-      'paillier_djn41_mode': self.paillier_djn41_mode,
       'paillier_use_crt_proofs': self.paillier_use_crt_proofs,
     }
 
@@ -532,6 +520,7 @@ class Election(HeliosModel):
   def ready_for_tallying(self):
     return datetime.datetime.utcnow() >= self.tallying_starts_at
 
+  # Computing the election tally
   def compute_tally(self):
     """
     tally the election, assuming votes already verified
@@ -573,8 +562,8 @@ class Election(HeliosModel):
       measure.record(self.uuid, 'aggregation_only_ns', aggregation_only_ns,
                      n_votes=tally.num_tallied)
 
-    self.encrypted_tally = tally  # original Helios
-    self.save()                   # original Helios
+    self.encrypted_tally = tally  
+    self.save()                   
 
   def ready_for_decryption(self):
     return self.encrypted_tally is not None
@@ -766,7 +755,7 @@ class Election(HeliosModel):
     return self.get_helios_trustee() is not None
 
   def helios_trustee_decrypt(self):
-    tally = self.encrypted_tally
+    tally = self.encrypted_tally # Tally from aggregation step3
     tally.init_election(self)
 
     trustee = self.get_helios_trustee()
