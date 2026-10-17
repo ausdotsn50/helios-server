@@ -6,17 +6,14 @@ from helios.crypto import algs, elgamal
 
 
 # ---------------------------------------------------------------------------
-# The interface homomorphic.py depends on
+# ElGamal half of shared interface
 # ---------------------------------------------------------------------------
 
 def _eg_generate_plaintexts(self, min=0, max=1):
   """
-  Was EncryptedAnswer.generate_plaintexts (homomorphic.py:26-39).
+  Was EncryptedAnswer.generate_plaintexts
 
-  Builds g^0, g^1, ... rather than 0, 1, ... because ElGamal.encrypt refuses to
-  encrypt zero -- elgamal.js throws "Can't encrypt 0 with El Gamal". Paillier
-  encrypts zero natively, which is precisely why this method has to become
-  scheme-aware instead of staying a shared expression.
+  Builds g^0, g^1, ... rather than 0, 1, ... for ElGamal
   """
   plaintexts = []
   running_product = 1
@@ -34,21 +31,15 @@ def _eg_generate_plaintexts(self, min=0, max=1):
 
 
 def _eg_random_randomness(self):
-  """Was `algs.random.mpz_lt(pk.q)` (homomorphic.py:128).
+  """Was `algs.random.mpz_lt(pk.q)`
 
-  Note the exponent is drawn from Z_q with q of 256 bits, not from Z_p. That
-  short exponent in a 2048-bit group is a large structural advantage for
-  ElGamal and the single biggest term in the 5.1 cost model.
+  Note the exponent is drawn from Z_q with q of 256 bits, not from Z_p.
   """
   return algs.random.mpz_lt(self.q)
 
 
 def _eg_combine_randomness(self, acc, r):
-  """Was `randomness_sum = (randomness_sum + r) % pk.q` (homomorphic.py:138).
-
-  ElGamal sums randomness; Paillier multiplies it mod n. Same line, different
-  operation -- the one place the identical-control-flow claim needs a named
-  abstraction rather than a shared expression.
+  """Was `randomness_sum = (randomness_sum + r) % pk.q`
   """
   return (acc + r) % self.q
 
@@ -57,14 +48,10 @@ def _eg_verify_decryption_proof(self, ciphertext, factor, proof,
                                 challenge_generator):
   """
   Was the positional call in Tally.verify_decryption_proofs
-  (homomorphic.py:401):
 
       proof.verify(public_key.g, answer_tally.alpha, public_key.y,
                    int(decryption_factors[q_num][a_num]),
                    public_key.p, public_key.q, challenge_generator)
-
-  Deeply ElGamal-shaped -- it names alpha and y -- and so cannot be shared with
-  a scheme whose decryption factor is the plaintext itself.
   """
   return proof.verify(self.g, ciphertext.alpha, self.y, int(factor),
                       self.p, self.q, challenge_generator)
@@ -73,16 +60,8 @@ def _eg_verify_decryption_proof(self, ciphertext, factor, proof,
 def _eg_tally_decoder(self, num_tallied):
   """
   Was the DLogTable construction and lookup in Tally.decrypt_from_factors
-  (homomorphic.py:415-416, 429).
 
   Returns a callable mapping a decrypted group element to its tally.
-
-  Helios does NOT use baby-step giant-step. DLogTable.precompute walks
-  g^0..g^N by repeated modular multiplication into a dict, so recovery is
-  Theta(N) in the number of voters and O(1) per lookup -- and, importantly,
-  INDEPENDENT of how votes are distributed. Paillier has no counterpart at all,
-  which is why tally_decoder exists as a seam rather than the dlog table being
-  referenced directly.
 
   DLogTable is imported lazily: helios/workflows/__init__.py imports this
   module, so a module-level import of homomorphic would close a cycle.
@@ -95,12 +74,11 @@ def _eg_tally_decoder(self, num_tallied):
 
 
 def _eg_disjunctive_challenge_generator(self):
-  """Was `algs.EG_disjunctive_challenge_generator` (homomorphic.py:68, 80, 133, 150)."""
   return algs.EG_disjunctive_challenge_generator
 
 
 def _eg_fiatshamir_challenge_generator(self):
-  """Was `algs.EG_fiatshamir_challenge_generator` (models.py, Trustee.verify_decryption_proofs).
+  """Was `algs.EG_fiatshamir_challenge_generator`
 
   The single-commitment form, used to verify decryption proofs. Not on the
   measured path, but on the verifiability path.
@@ -152,11 +130,6 @@ _TARGETS = (elgamal.PublicKey, algs.EGPublicKey)
 def install():
   """
   Attach the interface. Idempotent, and never overwrites an existing attribute.
-
-  The no-overwrite rule matters: if a future upstream Helios grows a real
-  `generate_plaintexts` on its public key, this module must defer to it rather
-  than silently shadow it -- a monkey-patch that clobbers is how an upstream
-  bugfix gets undone without anyone noticing.
   """
   for target in _TARGETS:
     for name, fn in _METHODS.items():
