@@ -11,6 +11,7 @@ import time
 from helios import measure
 from . import WorkflowObject
 
+
 class EncryptedAnswer(WorkflowObject):
   """
   An encrypted answer to a single election question
@@ -27,7 +28,7 @@ class EncryptedAnswer(WorkflowObject):
   def generate_plaintexts(cls, pk, min=0, max=1):
     # Delegated to the public key: ElGamal builds g^0, g^1, ... because it
     # cannot encrypt zero, while Paillier uses the integers themselves.
-    return pk.generate_plaintexts(min=min, max=max)
+    return pk.generate_plaintexts(min=min, max=max) # msg assoc. with Public key
 
   def verify_plaintexts_and_randomness(self, pk):
     """
@@ -50,7 +51,7 @@ class EncryptedAnswer(WorkflowObject):
     possible_plaintexts = self.generate_plaintexts(pk)
     homomorphic_sum = 0
       
-    for choice_num in range(len(self.choices)):
+    for choice_num in range(len(self.choices)): # Per answer slot check
       choice = self.choices[choice_num]
       choice.pk = pk
       individual_proof = self.individual_proofs[choice_num]
@@ -167,7 +168,6 @@ class EncryptedVote(WorkflowObject):
 
   answers = property(_answers_get, _answers_set)
 
-  # CastVote: answers/hash/uuid
   def verify(self, election):
     # correct number of answers
     # noinspection PyUnresolvedReferences
@@ -194,17 +194,16 @@ class EncryptedVote(WorkflowObject):
       return False
 
     # check proofs on all of answers
-    for question_num in range(len(election.questions)):
-      ea = self.encrypted_answers[question_num]
+    for question_num in range(len(election.questions)):   # one pass per question in the ELECTION 
+      ea = self.encrypted_answers[question_num]   # the ballot's bundle for this question: choices, individual_proofs, overall_proof
 
-      question = election.questions[question_num]
-      min_answers = 0
+      question = election.questions[question_num]   # the server's definition of the ff question
+      min_answers = 0   
       if 'min' in question:
         min_answers = question['min']
-        
-      if not ea.verify(election.public_key, min=min_answers, max=question['max']):
-        return False
-        
+
+      if not ea.verify(election.public_key, min=min_answers, max=question['max']):    # refer to verify function of an EncryptedAnswer object
+        return False                                          
     return True
     
   @classmethod

@@ -132,13 +132,8 @@ Paillier.PublicKey = Class.extend({
     return this.randomZStarN();
   },
 
-  // Standard: MULTIPLICATIVE. V = prod(v_i) mod n is the correct combined
+  // Standard: V = prod(v_i) mod n is the correct combined
   // witness because (prod v_i)^n = prod(v_i^n) mod n^2.
-  //
-  // DJN 4.1: ADDITIVE, because the randomness is an exponent and
-  // hn^r1 * hn^r2 = hn^(r1+r2). No modulus -- reducing would need ord(h), which
-  // divides lambda(n) and is secret. The sum outgrows one exponent only by
-  // log2 of the number of summands, which TABLE_HEADROOM_BITS covers.
   combineRandomness: function(acc, r) {
     if (this.usesDJN41())
       return acc.add(r);

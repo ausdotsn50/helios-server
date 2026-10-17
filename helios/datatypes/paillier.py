@@ -13,22 +13,7 @@ class PaillierObject(LDObject):
 
 class PublicKey(PaillierObject):
     """
-    A Paillier public key: {n, g}, plus {h, hn, djn41_mode} under DJN 4.1.
-
-    The 4.1 fields are emitted ONLY when the key is in a DJN mode, rather than
-    being declared in FIELDS and serialized as nulls on a standard key. Two
-    reasons:
-
-    1. A standard key's serialization is then byte-for-byte what it was before
-       4.1 existed, so stored elections and the B8 ballot-size canary are
-       unaffected.
-    2. The mode travels with the key. The booth sees only the public key, and
-       a 'short' key and a 'long' key differ in nothing else, so a key that
-       round-trips through the database comes back in the mode it went in.
-
-    Both shapes reach this class from the 'legacy/EGPublicKey' hint too: the
-    shape dispatch in helios/datatypes/__init__.py keys on 'y' being absent and
-    'n' present, which holds for either.
+    A Paillier public key: {n, g}, plus {h, hn, djn41_mode} under DJN 4.1
     """
     WRAPPED_OBJ_CLASS = crypto_paillier.PaillierPublicKey
     FIELDS = ['n', 'g']
@@ -79,14 +64,6 @@ class Ciphertext(PaillierObject):
 
 
 class ZKProof(PaillierObject):
-    """
-    One Pi_root transcript.
-
-    `commitment` is a plain big integer, where legacy/EGZKProof's is a nested
-    legacy/EGZKProofCommitment of {A, B}. Chaum-Pedersen commits to two values;
-    Pi_root commits to one. That difference is also the discriminator
-    helios/datatypes/__init__.py dispatches on.
-    """
     WRAPPED_OBJ_CLASS = crypto_paillier.PaillierZKProof
     FIELDS = ['commitment', 'challenge', 'response']
     STRUCTURED_FIELDS = {

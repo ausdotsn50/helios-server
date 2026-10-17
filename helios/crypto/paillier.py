@@ -24,11 +24,7 @@ TABLE_HEADROOM_BITS = 16
 
 def check_djn41_primes(p, q):
   """
-  Raise ValueError unless (p, q) meet DJN 4.1's conditions on the modulus.
-
-  Checked directly rather than inferred: p = q = 3 (mod 4), gcd(p-1, q-1) = 2,
-  and p, q, (p-1)/2 and (q-1)/2 all prime -- so the only odd prime factor of
-  p-1 is (p-1)/2, which is as large as it can be.
+  Raise ValueError unless (p, q) meet DJN 4.1's conditions on the modulus
   """
   if p == q:
     raise ValueError("DJN 4.1: p and q must be distinct")
@@ -54,11 +50,6 @@ def _odd_primes_up_to(bound):
   return tuple(i for i in range(3, bound + 1, 2) if sieve[i])
 
 
-# The joint cheap rejection in generate_safe_prime: a candidate whose p' or
-# 2p'+1 shares a factor with this product is discarded before any modular
-# exponentiation. Built once, at import. The bound is a trade-off -- a larger
-# product rejects more candidates but makes every gcd dearer -- and is chosen
-# by measurement: helios/benchmarks/safe_prime_bench.py.
 _SIEVE_BOUND = 1 << 12
 _SIEVE_PRIMES = _odd_primes_up_to(_SIEVE_BOUND)
 _SIEVE_PRODUCT = math.prod(_SIEVE_PRIMES)
@@ -94,14 +85,6 @@ def _generate_safe_prime(bits, sieve_bound, sieve_product):
 def djn41_fields_from_dict(d):
   """
   The DJN 4.1 fields of a serialized public key, as constructor arguments.
-
-  A standard key carries none of them; a DJN key carries h, hn and djn41_mode.
-  Shared by PaillierPublicKey.from_dict and the paillier/PublicKey datatype, so
-  the two cannot disagree about the format.
-
-  A key with DJN parameters but no djn41_mode is the retired format -- h was
-  g'^(2n) mod n^2, with g' published -- and is refused. Reading it as a
-  standard key would quietly run an election labelled 'short' as 'off'.
   """
   mode = d.get('djn41_mode', 'off')
   if mode not in DJN41_MODES:
@@ -432,50 +415,25 @@ class PaillierPublicKey:
 
   def __mul__(self, other):
     """
-    Refuse to combine Paillier trustee keys.
-
-    ElGamal-Helios combines trustee keys at freeze (models.py:613-618) because
-    every trustee generates a secret in the SAME hardcoded group, so y = prod(yi)
-    corresponds to x = sum(xi). Note this is not distributed key generation:
-    there is no shared secret, no polynomial and no secret sharing, and both
-    algs.py:530 and elgamal.py:420 say "For now, no support for threshold".
-
-    Paillier has no shared group to generate into. Trustees would produce
-    unrelated moduli n_i, and no operation combines RSA-shaped moduli into a
-    joint public key. Paillier's multi-party counterpart is the threshold
-    variant, which needs genuine DKG -- out of scope. So single-trustee follows
-    from the cryptosystem's structure rather than from convenience.
-
-    The 0/1 cases are the identities homomorphic_sum relies on and are kept.
+    Refuse to combine Paillier trustee keys
     """
     if other == 0 or other == 1:
       return self
 
     raise NotImplementedError(
       "Paillier trustee keys cannot be combined; threshold Paillier requires "
-      "DKG, which is out of scope. See PAILLIER_BUILD_SPEC.md 4.6.")
+      "DKG, which is out of scope.")
 
   # Counterpart of helios/crypto/scheme_adapters.py's ElGamal side. Keeping
   # these on the public key is what lets workflows/homomorphic.py hold zero
   # references to any scheme.
 
   def generate_plaintexts(self, min=0, max=1):
-    """
-    The candidate plaintexts for a disjunctive proof: the integers themselves.
-
-    ElGamal builds g^0, g^1, ... because ElGamal.encrypt refuses to encrypt
-    zero. Paillier encrypts zero natively, so no encoding is needed and m is
-    the integer.
-    """
     return [PaillierPlaintext(i, self) for i in range(min, max + 1)]
 
   def random_randomness(self):
     """
-    Fresh encryption randomness.
-
-    Standard: a base, uniform on Z*_n.
-    DJN 4.1: an exponent, uniform on [0, exponent_bound) -- that is,
-    [0, 2^ceil(k/2)) under 'short' and [0, n // 2) under 'long'.
+    Fresh encryption randomness
     """
     if self.uses_djn_41:
       return random_lt(self.exponent_bound)
@@ -954,19 +912,19 @@ class PaillierCiphertext:
     if len(plaintexts) != len(proof.proofs):
       return False
 
-    for i in range(len(plaintexts)):
+    for i in range(len(plaintexts)): # similar w/ elgamal.py verif
       if not self.verify_encryption_proof(plaintexts[i], proof.proofs[i]):
         return False
 
-    return (challenge_generator([p.commitment for p in proof.proofs]) ==
-            (sum([p.challenge for p in proof.proofs]) % CHALLENGE_MODULUS))
+    # e0+e1+...+en = hash(a0,a1,...,an) mod 2^160
+    return (challenge_generator([p.commitment for p in proof.proofs]) ==    # Hash commitments
+            (sum([p.challenge for p in proof.proofs]) % CHALLENGE_MODULUS)) # Sum the challenges
 
   def decrypt(self, decryption_factors, public_key):
     if len(decryption_factors) != 1:
       raise NotImplementedError(
         "Paillier elections support exactly one trustee, got %s decryption "
-        "factor sets; threshold Paillier requires DKG, which is out of scope. "
-        "See PAILLIER_BUILD_SPEC.md 4.6." % len(decryption_factors))
+        "factor sets; threshold Paillier requires DKG, which is out of scope. " % len(decryption_factors))
 
     return int(decryption_factors[0])
 
@@ -1010,13 +968,6 @@ class PaillierZKProof:
 
       Verify:     z^n = a * u^e  (mod n^2)
                   and gcd(z,n) = gcd(u,n) = gcd(a,n) = 1
-
-  `commitment` is a SCALAR, where EGZKProof's is {'A': ..., 'B': ...}. That is a
-  deliberate shape difference and the reason Paillier's proof layer is relatively
-  cheaper than its ciphertext arithmetic alone would suggest: Chaum-Pedersen must
-  compute A = g^w and B = y^w and its simulator must solve for both, while
-  Pi_root computes one value and solves for one. The field NAME is kept so the
-  harness's proof_bytes slicing is unaffected.
   """
 
   datatype = 'paillier/ZKProof'
@@ -1030,30 +981,10 @@ class PaillierZKProof:
   def generate(cls, u, v, pk, challenge_generator, accelerator=None):
     """
     Honest proof that `u` is an n-th power with witness `v`.
-
-    THE REDUCTION MODULUS IN THE RESPONSE IS NOT COSMETIC. `z` is reduced mod n,
-    never mod n^2. Reducing mod n^2 still verifies -- z^n mod n^2 depends only on
-    z mod n^2 -- while making the honest branch's z about twice the bit length of
-    every simulated branch's. The real branch then becomes identifiable by
-    inspection and ballot secrecy is gone.
-
-    This is exactly the bug in ishaq/Paillier-E-Voting. It is invisible to
-    functional testing: every proof still verifies. Test 11 compares the bit-
-    length distributions of real and simulated responses and exists solely to
-    catch it.
     """
     n, n2 = pk.n, pk.n2
-
-    # Z*_n in EVERY mode, never pk.random_randomness(): under DJN 4.1 that is
-    # an exponent from a narrower range, and the zero-knowledge argument needs
-    # r uniform on Z*_n -- r is what hides v^e in z = r * v^e.
     r = random_z_star_n(n)
 
-    # `accelerator` is a secret key, passed ONLY when the prover happens to
-    # hold the factorization -- i.e. the trustee proving correct decryption.
-    # The voter never has one, so ballot proofs are unaffected and remain
-    # exactly as costly as before. Same transcript either way; only the route
-    # to a differs.
     if accelerator is not None:
       a = accelerator.crt_pow_n2(r, n)
     else:
@@ -1081,9 +1012,6 @@ class PaillierZKProof:
     if challenge is None:
       challenge = random_lt(CHALLENGE_MODULUS)
 
-    # Z*_n in every mode too. An honest z = r * v^e mod n is uniform on Z*_n,
-    # so a simulated z from any other range -- such as a DJN 4.1 exponent
-    # range -- marks the real branch. The booth once shipped exactly that bug.
     z = random_z_star_n(n)
     a = (pow(z, n, n2) * number.inverse(pow(u, challenge, n2), n2)) % n2
 
@@ -1098,25 +1026,19 @@ class PaillierZKProof:
     if self.commitment is None or self.challenge is None or self.response is None:
       return False
 
-    # DJN 5.2: the challenge is "a random t bit number". The disjunctive
-    # verifier checks only that the branch challenges SUM to the hash mod 2^160,
-    # and a false branch verifies for every challenge in one residue class mod
-    # n -- so without this bound, adding k*n to one challenge (n is odd, hence
-    # invertible mod 2^160) forges a proof for any plaintext at all. Every
-    # disjunctive branch passes through here. See test 12f.
-    if not (0 <= self.challenge < CHALLENGE_MODULUS):
+    if not (0 <= self.challenge < CHALLENGE_MODULUS):  # check cond1: 0 <= e < 2^160
       return False
 
     # Unit checks. Without them a malicious prover could submit a value sharing
     # a factor with n, for which the exponentiation identities do not hold.
-    for value in (self.response, u, self.commitment):
+    for value in (self.response, u, self.commitment): # check cond2: u,a,z prime to n
       if value % n == 0 or math.gcd(value, n) != 1:
         return False
 
-    left = pow(self.response, n, n2)
-    right = (self.commitment * pow(u, self.challenge, n2)) % n2
+    left = pow(self.response, n, n2)  # z^n mod n^2
+    right = (self.commitment * pow(u, self.challenge, n2)) % n2   # a * u^e mod n^2
 
-    if left != right:
+    if left != right: 
       return False
 
     if challenge_generator is not None:
