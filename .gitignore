@@ -12,3 +12,8 @@ env.sh
 IMPLEMENTATION_SPEC.md
 RUNBOOK.md
 CHANGELOG.md
+helios/tests_paillier.py
+helios/tests_measure_parity.py
+
+# local docs (not for the repo)
+docs/

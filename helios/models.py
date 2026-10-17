@@ -67,6 +67,34 @@ class Election(HeliosModel):
   election_type = models.CharField(max_length=250, null=False, default='election', choices = ELECTION_TYPES)
   private_p = models.BooleanField(default=False, null=False)
 
+  # which cryptosystem this election uses
+  CRYPTO_SCHEMES = (
+    ('elgamal', 'Exponential ElGamal'),
+    ('paillier', 'Paillier'),
+    )
+
+  crypto_scheme = models.CharField(max_length=20, null=False, default='elgamal',
+                                   choices=CRYPTO_SCHEMES)
+
+  # CRT acceleration of the dec. proof for Paillier
+  paillier_use_crt_proofs = models.BooleanField(default=True, null=False)
+
+  @property
+  def ablation_config(self):
+    """
+    The optimization configuration this election ran under.
+
+    Emitted into every measurement record and cross-checked by the harness's
+    acceptance test, so a results file is self-describing about which
+    optimizations were active.
+    """
+    if self.crypto_scheme != 'paillier':
+      return {}
+
+    return {
+      'paillier_use_crt_proofs': self.paillier_use_crt_proofs,
+    }
+
   description = models.TextField()
   public_key = LDObjectField(type_hint = 'legacy/EGPublicKey',
                              null=True)
@@ -432,6 +460,13 @@ class Election(HeliosModel):
           'action': "add at least one trustee"
           })
 
+    # Safety measure enforcement only, no support for multi-trustee election
+    if self.crypto_scheme == 'paillier' and len(trustees) > 1:
+      issues.append({
+          'type': 'trustees',
+          'action': 'remove the extra trustees — Paillier elections support exactly one'
+          })
+
     for t in trustees:
       if t.public_key is None:
         issues.append({
@@ -485,6 +520,7 @@ class Election(HeliosModel):
   def ready_for_tallying(self):
     return datetime.datetime.utcnow() >= self.tallying_starts_at
 
+  # Computing the election tally
   def compute_tally(self):
     """
     tally the election, assuming votes already verified
@@ -526,8 +562,8 @@ class Election(HeliosModel):
       measure.record(self.uuid, 'aggregation_only_ns', aggregation_only_ns,
                      n_votes=tally.num_tallied)
 
-    self.encrypted_tally = tally  # original Helios
-    self.save()                   # original Helios
+    self.encrypted_tally = tally  
+    self.save()                   
 
   def ready_for_decryption(self):
     return self.encrypted_tally is not None
@@ -696,12 +732,15 @@ class Election(HeliosModel):
     trustee.secret_key = keypair.sk
 
     # FIXME: is this at the right level of abstraction?
-    trustee.public_key_hash = datatypes.LDObject.instantiate(trustee.public_key, datatype='legacy/EGPublicKey').hash
+    trustee.public_key_hash = datatypes.LDObject.instantiate(trustee.public_key, datatype=params.public_key_datatype).hash
 
-    # Schnorr proof of knowledge of the secret key. Timed here for the same
-    # reason as keygen above: this is where the deployed system pays it.
-    with measure.span(self.uuid, 'prove_sk_time_ns', context='election'):
-      trustee.pok = trustee.secret_key.prove_sk(algs.DLog_challenge_generator)
+    if params.dlog_challenge_generator is None:
+      # No pok for Paillier
+      trustee.pok = trustee.secret_key.prove_sk(None)
+    else:
+      # ElGamal: Schnorr proof of knowledge of the secret key
+      with measure.span(self.uuid, 'prove_sk_time_ns', context='election'):
+        trustee.pok = trustee.secret_key.prove_sk(params.dlog_challenge_generator)
 
     trustee.save()
 
@@ -716,17 +755,14 @@ class Election(HeliosModel):
     return self.get_helios_trustee() is not None
 
   def helios_trustee_decrypt(self):
-    # NOT timed: LDObjectField defines from_db_value, so the tally was already
-    # deserialized during Election.objects.get() in the task. This is an
-    # attribute read.
-    tally = self.encrypted_tally
+    tally = self.encrypted_tally # Tally from aggregation step3
     tally.init_election(self)
 
     trustee = self.get_helios_trustee()
-    # decryption_factor_time_ns and decryption_factor_only_ns are both
-    # recorded inside decryption_factors_and_proofs, on the same single
-    # pass, before trustee.save(). The harness polls on decryption_factors,
-    # so timings are readable by the time the completion signal appears.
+
+    if hasattr(trustee.secret_key, 'use_crt_for_proofs'):
+      trustee.secret_key.use_crt_for_proofs = self.paillier_use_crt_proofs
+
     factors, proof = tally.decryption_factors_and_proofs(
       trustee.secret_key, election_uuid=self.uuid)
 
@@ -1263,15 +1299,12 @@ class CastVote(HeliosModel):
   def get_by_voter(cls, voter):
     return cls.objects.filter(voter = voter).order_by('-cast_at')
 
-  def verify_and_store(self):
+  def verify_and_store(self): # called by the task
     # if it's quarantined, don't let this go through
     if self.is_quarantined:
       raise Exception("cast vote is quarantined, verification and storage is delayed.")
 
-    # Proof checking alone. The enclosing verification_time_ns (tasks.py) also
-    # covers the two row writes below; this span isolates the cryptography, so
-    # the claim that verification is essentially all ZKP work is measured
-    # rather than asserted.
+    # Proof checking alone. The enclosing verification_time_ns (tasks.py) covers the row writes below
     with measure.span(self.voter.election.uuid, 'verification_only_ns',
                       cast_vote_id=self.id):
       result = self.vote.verify(self.voter.election)
@@ -1407,7 +1440,7 @@ class Trustee(HeliosModel):
     verify that the decryption proofs match the tally for the election
     """
     # verify_decryption_proofs(self, decryption_factors, decryption_proofs, public_key, challenge_generator):
-    return self.election.encrypted_tally.verify_decryption_proofs(self.decryption_factors, self.decryption_proofs, self.public_key, algs.EG_fiatshamir_challenge_generator)
+    return self.election.encrypted_tally.verify_decryption_proofs(self.decryption_factors, self.decryption_proofs, self.public_key, self.public_key.fiatshamir_challenge_generator)
 
 
 class EmailOptOut(models.Model):

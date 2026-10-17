@@ -19,7 +19,56 @@ class ElectionForm(forms.Form):
   randomize_answer_order = forms.BooleanField(required=False, initial=False, help_text='enable this if you want the answers to questions to appear in random order for each voter')
   private_p = forms.BooleanField(required=False, initial=False, label="Private?", help_text='A private election is only visible to registered voters.')
   help_email = forms.CharField(required=False, initial="", label="Help Email Address", help_text='An email address voters should contact if they need help.')
-  
+
+  # Which cryptosystem to run this election under. Defaults to elgamal and is
+  # not required, so an existing caller that omits the field -- including the
+  # measurement harness before it was taught about schemes -- gets exactly the
+  # behaviour it had before.
+  crypto_scheme = forms.ChoiceField(
+    required=False, initial='elgamal', label="Cryptosystem",
+    choices=Election.CRYPTO_SCHEMES,
+    help_text='Paillier is experimental and supports exactly one trustee.')
+
+  # Optimization ablations (masterplan 6.3). Per-election so the workload can
+  # vary them cell by cell without restarting anything, and so a stored
+  # election records what it actually ran under.
+  paillier_use_crt_proofs = forms.BooleanField(
+    required=False, initial=True, label="Paillier: CRT decryption proofs",
+    help_text='Chinese Remainder Theorem acceleration of the decryption proof. '
+              'No additional assumption; on by default.')
+
+  def clean_crypto_scheme(self):
+    # An empty submission means "unchanged", not "invalid".
+    return self.cleaned_data.get('crypto_scheme') or 'elgamal'
+
+  # --- ablation flags: parsed from the RAW post, not via CheckboxInput -----
+  #
+  # forms.BooleanField uses CheckboxInput, whose value_from_datadict maps only
+  # the literal strings "true"/"false" and otherwise falls through to
+  # bool(value). Since bool("0") is True, posting "0" to turn a flag OFF turns
+  # it ON -- silently, and with the form reporting valid.
+  #
+  # The CRT flag therefore reads self.data directly, so that "0", "false", ""
+  # and absence all mean what a caller would expect, independent of widget
+  # behaviour.
+
+  FALSEY = ('', '0', 'false', 'False', 'off', 'no')
+
+  def _raw_flag(self, name, default):
+    if name not in self.data:
+      return default
+    return self.data.get(name) not in self.FALSEY
+
+  def clean_paillier_use_crt_proofs(self):
+    """
+    On unless explicitly disabled.
+
+    Defaults TRUE when absent, unlike a normal BooleanField: an unchecked
+    checkbox submits nothing, and a caller that never heard of this field must
+    not thereby disable an optimization that costs no extra assumption.
+    """
+    return self._raw_flag('paillier_use_crt_proofs', True)
+
   if settings.ALLOW_ELECTION_INFO_URL:
     election_info_url = forms.CharField(required=False, initial="", label="Election Info Download URL", help_text="the URL of a PDF document that contains extra election information, e.g. candidate bios and statements")
   

@@ -21,14 +21,6 @@ from .view_utils import render_template_raw
 @shared_task
 def cast_vote_verify_and_store(cast_vote_id, status_update_message=None, **kwargs):
     cast_vote = CastVote.objects.get(id=cast_vote_id)
-    # Proof verification, in the process that actually performs it: the
-    # Celery worker, at cast time. One record per ballot.
-    #
-    # NOT cast_vote.vote.election: CastVote.vote is an EncryptedVote LDObject,
-    # which carries election_uuid but gets .election only from init_election(),
-    # never called on this path. Reading it raises, and because the expression
-    # is evaluated in the argument list it escapes span's own guard and fails
-    # the cast. Use the same path the code below already uses.
     with measure.span(cast_vote.voter.election.uuid, 'verification_time_ns',
                       cast_vote_id=cast_vote_id):
         result = cast_vote.verify_and_store()
@@ -148,8 +140,15 @@ def tally_helios_decrypt(election_id):
     if measure.enabled():
         from helios import datatypes
         _trustee = election.get_helios_trustee()
-        _f_type = datatypes.arrayOf(datatypes.arrayOf('core/BigInteger'))
-        _p_type = datatypes.arrayOf(datatypes.arrayOf('legacy/EGZKProof'))
+        # The type hints come from the Trustee fields themselves, because
+        # LDObjectField.get_prep_value serializes with exactly those: the
+        # measured size is then the stored size by construction, for any
+        # scheme. A copied literal would only match by coincidence -- the
+        # proofs hint 'legacy/EGZKProof' is scheme-ambiguous, and Paillier
+        # proofs serialize as paillier/ZKProof only because datatypes honours
+        # the object's own datatype for such hints.
+        _f_type = _trustee._meta.get_field('decryption_factors').type_hint
+        _p_type = _trustee._meta.get_field('decryption_proofs').type_hint
         _n_cells = sum(len(q) for q in election.encrypted_tally.tally)
         measure.record(
             election.uuid, 'decryption_factors_bytes',

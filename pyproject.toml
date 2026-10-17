@@ -33,6 +33,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "phe>=1.5.0",
 ]
 workload = [
     "pyyaml>=6.0.3",
