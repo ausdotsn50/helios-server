@@ -21,17 +21,15 @@ class ElectionForm(forms.Form):
   help_email = forms.CharField(required=False, initial="", label="Help Email Address", help_text='An email address voters should contact if they need help.')
 
   # Which cryptosystem to run this election under. Defaults to elgamal and is
-  # not required, so an existing caller that omits the field -- including the
-  # measurement harness before it was taught about schemes -- gets exactly the
+  # not required, so an existing caller that omits the field gets exactly the
   # behaviour it had before.
   crypto_scheme = forms.ChoiceField(
     required=False, initial='elgamal', label="Cryptosystem",
     choices=Election.CRYPTO_SCHEMES,
     help_text='Paillier is experimental and supports exactly one trustee.')
 
-  # Optimization ablations (masterplan 6.3). Per-election so the workload can
-  # vary them cell by cell without restarting anything, and so a stored
-  # election records what it actually ran under.
+  # Optimization switches. Per-election, so a stored election records what it
+  # actually ran under.
   paillier_use_crt_proofs = forms.BooleanField(
     required=False, initial=True, label="Paillier: CRT decryption proofs",
     help_text='Chinese Remainder Theorem acceleration of the decryption proof. '

@@ -424,10 +424,9 @@ def list_trustees_view(request, election):
   
 @election_admin(frozen=False)
 def new_trustee(request, election):
-  # Enforcement point 3 of PAILLIER_BUILD_SPEC.md 4.6. Together with
-  # trustee_upload_pk below, this is one of the two routes by which a second
-  # trustee can be added at all. new_trustee_helios is fine: it creates the
-  # single Helios trustee, which is the intended one.
+  # Paillier supports exactly one trustee. Together with trustee_upload_pk
+  # below, this is one of the two routes by which a second trustee can be
+  # added. new_trustee_helios is fine: it creates the single Helios trustee.
   if election.crypto_scheme == 'paillier':
     raise PermissionDenied(
       "Paillier elections support exactly one trustee. Trustee public keys "
@@ -638,7 +637,7 @@ def trustee_check_sk(request, election, trustee):
   
 @trustee_check
 def trustee_upload_pk(request, election, trustee):
-  # Enforcement point 3 of PAILLIER_BUILD_SPEC.md 4.6, second route.
+  # The second route to a second trustee; see new_trustee.
   if election.crypto_scheme == 'paillier':
     raise PermissionDenied(
       "Paillier elections support exactly one trustee, held by the Helios "

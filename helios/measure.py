@@ -5,11 +5,10 @@ Writes one JSON object per line to the path in HELIOS_MEASURE_PATH.
 When that variable is unset, every function here is a no-op and Helios
 behaves exactly as upstream -- this is the production default.
 
-Records are keyed by election uuid. The harness creates exactly one
-election per measurement cell, knows its uuid, and joins on it. The file
-is therefore append-only and shared across runs: the web process and the
-Celery worker are long-lived and read this path once at startup, so it
-cannot be run-scoped.
+Records are keyed by election uuid, so a reader joins on the election it
+created. The file is append-only and shared across runs: the web process
+and the Celery worker are long-lived and read this path once at startup,
+so it cannot be run-scoped.
 
 Nothing here alters a ciphertext, an ordering, a return value, or a
 database write.
@@ -72,8 +71,7 @@ def record(election_uuid, metric, value_ns, **extra):
         # interleave. Volume is a few records per election -- not a hot path.
         #
         # fsync before returning, so a record is on disk before the database
-        # field the harness polls is written. The harness therefore never sees
-        # a completion signal whose timing is not yet readable.
+        # field that signals completion is written.
         with open(_PATH, 'a') as f:
             f.write(line + '\n')
             f.flush()

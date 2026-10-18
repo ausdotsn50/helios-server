@@ -9,8 +9,7 @@ from Crypto.Util import number
 
 from helios.crypto.utils import random
 
-# Bits per prime. |n| = 2*KEY_SIZE = 2048, matching ElGamal's 2048-bit p, so the
-# two arms are compared at equal modulus width.
+# Bits per prime. |n| = 2*KEY_SIZE = 2048, matching ElGamal's 2048-bit p.
 DEFAULT_KEY_SIZE = 1024
 
 # Minimum modulus width accepted by validate_pk_params. Tests construct keys far
@@ -334,8 +333,7 @@ class PaillierSecretKey:
     self._h_p = self._h_q = self._p_inv = self._p2_inv_q2 = None
 
   # Whether the decryption PROOF uses CRT. Decryption itself always does --
-  # see decrypt_factor. Kept separate and switchable so B10 can measure the
-  # two independently rather than reporting one number for both.
+  # see decrypt_factor. Kept separate so the two can be measured independently.
   use_crt_for_proofs = True
 
   @property
@@ -475,10 +473,7 @@ class PaillierSecretKey:
 
     # Both remaining exponentiations are CRT-accelerable, and both are run
     # exclusively by the trustee. See the note on crt_pow_n / crt_pow_n2.
-    #
-    # use_crt_for_proofs is the ablation switch: turning it off measures what
-    # CRT is worth on the proof, which is what lets the manuscript report the
-    # figure rather than assert it.
+    # Turning use_crt_for_proofs off measures what CRT is worth on the proof.
     if self.use_crt_for_proofs:
       v = self.crt_pow_n(u, d)                    # was pow(u, d, n)
       proof = PaillierZKProof.generate(u, v, pk, challenge_generator,
@@ -499,11 +494,8 @@ class PaillierSecretKey:
     Returns None. Paillier generates no trustee proof of knowledge of the
     secret key.
 
-    Its analogue is a proof of knowledge of the factorization (Poupard-Stern):
-    real work, no measurement payoff. The ElGamal analogue is a single Schnorr
-    proof costing about one exponentiation out of thousands per election, and
-    the harness already collects 30 prove_sk_time_ns samples per run, so the
-    manuscript can quantify exactly what is being omitted.
+    Its analogue, a proof of knowledge of the factorization (Poupard-Stern),
+    is not implemented.
 
     Trustee.pok is LDObjectField(type_hint='legacy/DLogProof', null=True), so
     None persists cleanly.

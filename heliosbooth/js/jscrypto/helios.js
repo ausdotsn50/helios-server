@@ -613,10 +613,9 @@ HELIOS.Trustee = Class.extend({
 HELIOS.Trustee.fromJSONObject = function(d) {
   var pk = CRYPTO.publicKeyFromJSONObject(d.public_key);
 
-  // The Paillier arm generates no trustee proof of knowledge of the secret key
-  // -- its analogue is a proof of knowledge of the factorization, which is real
-  // work with no measurement payoff -- so pok is stored as null. An empty proof
-  // object is deliberately NOT fabricated: it would verify vacuously.
+  // Paillier generates no trustee proof of knowledge of the secret key, so pok
+  // is stored as null. An empty proof object is deliberately NOT fabricated: it
+  // would verify vacuously.
   var pok = (d.pok == null) ? null : ElGamal.DLogProof.fromJSONObject(d.pok);
 
   return new HELIOS.Trustee(d.uuid,

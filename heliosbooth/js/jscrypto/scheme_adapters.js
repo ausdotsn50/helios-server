@@ -8,7 +8,7 @@
  *
  * The Paillier side lives on Paillier.PublicKey in paillier.js. The ElGamal
  * side is attached here rather than edited into elgamal.js, so that file stays
- * byte-identical -- the control arm of the experiment must not move.
+ * byte-identical to upstream.
  *
  * Every body below is COPIED VERBATIM from the helios.js call site it replaces,
  * so the refactor is behaviour-preserving by construction. Line references are

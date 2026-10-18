@@ -83,10 +83,6 @@ class Election(HeliosModel):
   def ablation_config(self):
     """
     The optimization configuration this election ran under.
-
-    Emitted into every measurement record and cross-checked by the harness's
-    acceptance test, so a results file is self-describing about which
-    optimizations were active.
     """
     if self.crypto_scheme != 'paillier':
       return {}
