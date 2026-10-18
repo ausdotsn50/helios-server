@@ -823,6 +823,37 @@ class PaillierProofTests(unittest.TestCase):
     self.assertEqual(m, 0)
     self.assertTrue(self.pk.verify_decryption_proof(c, 0, proof))
 
+  def test_08d_simulated_decryption_proof_is_rejected(self):
+    """
+    A simulated decryption proof for a wrong count must fail (F9).
+
+    The simulator picks e and z first and solves for a, so the transcript
+    satisfies z^n = a * u^e (mod n^2) and every range and unit check for ANY
+    claimed count. Only the Fiat-Shamir check e == H(a) stops it. Tests 08 and
+    08b present honest proofs with a wrong count, which fail the equation
+    anyway, so without this test deleting the hash check would fail nothing.
+    """
+    P = self.paillier
+    c, _ = self._encrypt(42)
+    wrong = 43
+    u = c._statement_for(P.PaillierPlaintext(wrong, self.pk))
+    forged = P.PaillierZKProof.simulate(u, self.pk)
+
+    # Everything except the hash holds: equation, challenge range, units.
+    self.assertTrue(forged.verify(u, self.pk, challenge_generator=None),
+                    'the simulated proof should pass every non-hash check')
+
+    # The hash check alone rejects it.
+    self.assertFalse(
+      self.pk.verify_decryption_proof(c, wrong, forged),
+      'a simulated decryption proof for a wrong count was accepted -- the '
+      'Fiat-Shamir check e == H(a) is not being applied')
+
+    # Control: the honest proof for the true count still verifies.
+    m, honest = self.sk.decryption_factor_and_proof(c)
+    self.assertEqual(m, 42)
+    self.assertTrue(self.pk.verify_decryption_proof(c, m, honest))
+
   # --- test 10 ------------------------------------------------------------
 
   def test_10_special_soundness_extraction(self):
@@ -1706,6 +1737,14 @@ class CrossImplementationTests(unittest.TestCase):
        'plaintext': str(m), 'proof': dproof.to_dict(), 'should_verify': True},
       {'label': 'decryption proof, wrong m', 'ciphertext': ct.to_dict(),
        'plaintext': str(m + 1), 'proof': dproof.to_dict(),
+       'should_verify': False},
+      # F9 on the JS side: a simulated proof passes the equation for any
+      # count, so only JS's e == H(a) check can reject it.
+      {'label': 'decryption proof, simulated for a wrong m',
+       'ciphertext': ct.to_dict(), 'plaintext': str(m + 1),
+       'proof': P.PaillierZKProof.simulate(
+         ct._statement_for(P.PaillierPlaintext(m + 1, self.pk)),
+         self.pk).to_dict(),
        'should_verify': False},
     ]
 
