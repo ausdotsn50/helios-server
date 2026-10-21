@@ -202,30 +202,14 @@ class LDObject(object):
     @classmethod
     def instantiate(cls, obj, datatype=None):
         """
-        The FIXME this replaced asked: "should datatype override the object's
-        internal datatype? probably not". The answer turns out to be "only
-        sometimes", and the boundary matters.
+        The object's own datatype wins only where the caller's hint is one of
+        the six ElGamal-specific legacy datatypes, i.e. exactly where the hint
+        is ambiguous under a second cryptosystem. Every other hint is honoured.
 
-        A blanket flip -- object's own datatype always wins -- is what the
-        Paillier design documents prescribe, on the stated grounds that the
-        wrapped crypto classes carry no `datatype` attribute. That is true of
-        helios.crypto.elgamal.* and helios.crypto.algs.*, and false of two
-        classes that reach this method:
-
-          homomorphic.EncryptedVote.datatype -> 'legacy/EncryptedVote'
-          homomorphic.Tally.datatype         -> 'legacy/Tally'
-          models.CastVote.datatype           -> 'legacy/CastVote' (when saved)
-
-        Under a blanket flip, legacy.EncryptedVote.includeRandomness() -- which
-        asks for 'legacy/EncryptedVoteWithRandomness' -- would be overridden
-        back to 'legacy/EncryptedVote' and silently drop the randomness a voter
-        needs to audit their own ballot. legacy.CastVote.short would likewise
-        serialize a full CastVote. Both are silent: the field lists are the same
-        length and only the nested structured types differ.
-
-        So the object's datatype wins only where the caller's hint is one of the
-        six ElGamal-specific legacy datatypes, i.e. exactly where the hint is
-        ambiguous under a second cryptosystem. Every other hint is honoured.
+        Letting the object's datatype always win would silently break callers
+        that ask for a different one: legacy.EncryptedVote.includeRandomness()
+        asks for 'legacy/EncryptedVoteWithRandomness', and would drop the
+        randomness a voter needs to audit their own ballot.
         """
         if isinstance(obj, LDObject):
             return obj

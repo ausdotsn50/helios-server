@@ -439,8 +439,7 @@ class Tally(WorkflowObject):
     # Paillier: the identity -- single-trustee decryption already yields the
     # plaintext, so there is no discrete logarithm to resolve.
     #
-    # Timed per scheme, on the public key's declared has_dlog: the same meaning
-    # as has_dlog in the workload harness's schemes.py.
+    # Timed per scheme, on the public key's declared has_dlog.
     if public_key.has_dlog:
       # Helios builds the dlog table here, in the web process, synchronously
       # inside the combine_decryptions request. For ElGamal, tally_decoder IS
