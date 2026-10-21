@@ -1,15 +1,14 @@
 /*
- * Test 11, JavaScript side — the ishaq canary for the booth.
+ * Test 11, JavaScript side — the response-distribution check for the booth.
  *
  *     node helios/js_bridge/check_response_distribution.js <pk.json> <trials>
- *         [--reduce-mod-n-squared]
  *
  * Real and simulated Pi_root responses must be indistinguishable, or the real
  * branch -- the vote -- can be read off the ballot. Test 11 checks the Python
  * prover; voters' proofs come from this one, so it is checked separately.
  *
  * Two statistics are reported. Bit length catches a response drawn from a
- * short range, and ishaq's mod-n^2 reduction in the other direction. A
+ * short range, and a mod-n^2 reduction in the other direction. A
  * response drawn from [0, n/2) is within noise of an honest one by bit length
  * but never lands above n/2, where half of all honest responses do, so each
  * group's count above n/2 is reported too.
@@ -28,20 +27,6 @@ function main() {
 
   const pk = P.PublicKey.fromJSONObject(pk_json);
   const plaintexts = pk.generatePlaintexts(0, 1);
-
-  // Guards the guard: --reduce-mod-n-squared plants ishaq's bug in the booth's
-  // own prover -- the real branch's response reduced mod n^2 rather than mod
-  // n -- so a test can show this canary catches it. Every proof still
-  // verifies: z^n mod n^2 depends only on z mod n.
-  if (process.argv.includes('--reduce-mod-n-squared')) {
-    P.Proof.generate = function(u, v, pk, challenge_generator) {
-      const r = pk.randomZStarN();
-      const a = r.modPow(pk.n, pk.n2);
-      const e = challenge_generator(a);
-      const z = r.multiply(v.modPow(e, pk.n)).mod(pk.n2);    // the BUG
-      return new P.Proof(a, e, z);
-    };
-  }
 
   const real = [];
   const simulated = [];

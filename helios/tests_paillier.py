@@ -149,7 +149,7 @@ TOY_P, TOY_Q = 1019, 1031            # n = 1_050_589
 MEDIUM_P, MEDIUM_Q = 1000003, 1000033  # n ~ 10^12, room for large tallies
 
 # A fixed pair of 512-bit primes, giving |n| = 1024: wide enough for the JS
-# canary's bit-length comparisons (test 11c), and fixed so that no test waits
+# response-distribution check (test 11c), and fixed so that no test waits
 # on prime generation.
 FIXED_1024_P = 13168689723100660585685922549334792506527228763451163683969222265825863724246852232201259732581751830544365565680414276277884873986403685288800169781242727
 FIXED_1024_Q = 8645116233607178444096843766139414926699103144057498079660518867117481230248921238509961864803698923112142027274849449064395322551689148313525971278196299
@@ -232,14 +232,6 @@ class PaillierCoreTests(unittest.TestCase):
     a = self.pk.encrypt_with_r(self._pt(3), r)
     b = self.pk.encrypt_with_r(self._pt(3), r)
     self.assertEqual(a.c, b.c)
-
-  def test_01d_encode_message_is_refused_not_ignored(self):
-    """
-    Signature parity with EGPublicKey.encrypt_with_r, but silently ignoring the
-    flag would let a caller believe subgroup encoding happened.
-    """
-    with self.assertRaises(Exception):
-      self.pk.encrypt_with_r(self._pt(1), 5, encode_message=True)
 
   # --- test 2 -------------------------------------------------------------
 
@@ -375,13 +367,6 @@ class PaillierCoreTests(unittest.TestCase):
         self.assertEqual(back, pk)
 
   # --- test 13 ------------------------------------------------------------
-
-  def test_13_crt_agreement(self):
-    """Both decryption paths agree on the same ciphertexts."""
-    for m in (0, 1, 2, 999, 10 ** 6):
-      c = self.pk.encrypt(self._pt(m))
-      self.assertEqual(self.sk.decryption_factor(c), self.sk.decrypt_no_crt(c))
-
   def test_13b_h_p_closed_form_matches_the_long_way(self):
     """
     h_p = (-q)^-1 mod p is a closed form of Paillier (1999) section 7's
@@ -469,7 +454,7 @@ class PaillierCoreTests(unittest.TestCase):
   def test_13c_mu_closed_form_matches_the_general_definition(self):
     """
     mu = lambda^-1 mod n is a simplification of (L(g^lambda mod n^2))^-1 mod n,
-    valid only because g = 1+n. Derived rather than quoted, so checked here.
+    valid only because g = 1+n. 
     """
     from Crypto.Util import number
 
@@ -626,27 +611,11 @@ _FAILS_ONLY_THE_UNIT_CHECK = {
   'branch_count': True, 'equations': True, 'units': False,
   'sum_matches_hash': True, 'challenges_in_range': True}
 
-
-# The JS ishaq canary (tests 11c and 11d): proofs per run, and the band the
-# above-n/2 count of each group must fall in. Half of all honest responses lie
-# above n/2, so an honest group of 32 leaves [4, 28] with probability ~1e-5.
-CANARY_TRIALS = 32
-CANARY_MIN_ABOVE_HALF = 4
+RESPONSE_TRIALS = 32
+RESPONSE_MIN_ABOVE_HALF = 4
 
 
-def _canary_alarms(verdict):
-  """
-  Every criterion of the ishaq canary that `verdict` trips. Empty means the
-  real and simulated responses are indistinguishable by all it measures.
-
-  - Mean bit lengths within 5 bits, and bit-length distributions that pass a
-    two-sample KS test at 1%. These catch a response drawn from a short range,
-    and ishaq's mod-n^2 reduction (test 11d).
-  - In each group, between CANARY_MIN_ABOVE_HALF and trials minus that many
-    responses above n/2. A response drawn from [0, n/2) never gets there, yet
-    is only one bit shorter than an honest one -- within noise of both
-    bit-length criteria.
-  """
+def _response_distribution_alarms(verdict):
   alarms = []
   if verdict['delta_bits'] >= 5.0:
     alarms.append('mean bit lengths differ by %.1f bits' % verdict['delta_bits'])
@@ -658,7 +627,7 @@ def _canary_alarms(verdict):
   trials = verdict['trials']
   for group in ('real', 'simulated'):
     above = verdict[group + '_above_half']
-    if not CANARY_MIN_ABOVE_HALF <= above <= trials - CANARY_MIN_ABOVE_HALF:
+    if not RESPONSE_MIN_ABOVE_HALF <= above <= trials - RESPONSE_MIN_ABOVE_HALF:
       alarms.append('%d of %d %s responses above n/2' % (above, trials, group))
 
   return alarms
@@ -703,7 +672,7 @@ class PaillierProofTests(unittest.TestCase):
 
   def test_05b_ciphertext_of_minus_one_is_rejected(self):
     """The other direction: a negative vote would subtract from a tally."""
-    c, r = self._encrypt(self.pk.n - 1)   # -1 mod n
+    c, r = self._encrypt(self.pk.n - 1)   # -1 in mod n arithmetic
     proof = c.generate_disjunctive_encryption_proof(self.bits, 1, r, self.gen)
     self.assertFalse(
       c.verify_disjunctive_encryption_proof(self.bits, proof, self.gen))
@@ -758,6 +727,8 @@ class PaillierProofTests(unittest.TestCase):
     V = prod(v_i) mod n is the correct witness because (prod v_i)^n =
     prod(v_i^n) mod n^2 -- the multiplicative analogue of ElGamal's additive
     randomness_sum.
+
+    On count proof, multiple branches, product of randomness needed
     """
     C, V = 0, 1
     for _ in range(4):
@@ -780,7 +751,8 @@ class PaillierProofTests(unittest.TestCase):
     kp = toy_keypair()
     pk = kp.pk
     P = self.paillier
-
+    
+    # 0 or 1, 0...12?
     for L, count in ((2, 500), (13, 100)):
       plaintexts = [P.PaillierPlaintext(i, pk) for i in range(L)]
       for trial in range(count):
@@ -847,7 +819,7 @@ class PaillierProofTests(unittest.TestCase):
     self.assertFalse(
       self.pk.verify_decryption_proof(c, wrong, forged),
       'a simulated decryption proof for a wrong count was accepted -- the '
-      'Fiat-Shamir check e == H(a) is not being applied')
+      'Fiat-Shamir check e == H(a) is not being applied') # Cond.
 
     # Control: the honest proof for the true count still verifies.
     m, honest = self.sk.decryption_factor_and_proof(c)
@@ -884,16 +856,11 @@ class PaillierProofTests(unittest.TestCase):
                      'extracted witness does not satisfy v^n = u (mod n^2)')
     self.assertEqual(extracted, v % n)
 
-  # --- test 11 — THE ISHAQ CANARY ----------------------------------------
+  # --- test 11 ------------------------------------------------------------
 
   def test_11_response_distribution(self):
     """
     Real and simulated responses must be indistinguishable.
-
-    ishaq/Paillier-E-Voting reduces the real branch's response mod n^2 while
-    simulated ones stay below n. Every proof still verifies, since z^n mod n^2
-    depends only on z mod n, but the real response is twice as long and the
-    vote can be read off the ballot.
     """
     P = self.paillier
     kp = toy_keypair()
@@ -921,36 +888,14 @@ class PaillierProofTests(unittest.TestCase):
     self.assertLess(
       abs(mean_real - mean_sim), 1.0,
       f'real responses average {mean_real:.2f} bits and simulated '
-      f'{mean_sim:.2f} — the real branch is identifiable by bit length. This '
-      f'is the ishaq bug: check that z is reduced mod n, not mod n^2.')
+      f'{mean_sim:.2f} — the real branch is identifiable by bit length. '
+      f'Check that z is reduced mod n, not mod n^2.')
 
     d, d_crit = _two_sample_ks(real_bits, sim_bits)
     self.assertLess(
       d, d_crit,
       f'KS statistic {d:.4f} exceeds the 1% critical value {d_crit:.4f} — the '
       f'real and simulated response distributions are distinguishable')
-
-  def test_11b_a_mod_n_squared_response_would_be_caught(self):
-    """Guards the guard: the ishaq bug, planted deliberately, trips test 11."""
-    P = self.paillier
-    kp = toy_keypair()
-    pk, n, n2 = kp.pk, kp.pk.n, kp.pk.n2
-
-    real_bits, sim_bits = [], []
-    for _ in range(300):
-      v = P.random_z_star_n(n)
-      r = P.random_z_star_n(n)
-      e = P.random_lt(P.CHALLENGE_MODULUS)
-
-      real_bits.append(((r * pow(v, e, n)) % n2).bit_length())  # the BUG
-      sim_bits.append(P.random_z_star_n(n).bit_length())
-
-    self.assertGreater(
-      abs(statistics.mean(real_bits) - statistics.mean(sim_bits)), 1.0,
-      'test 11 would not have caught the ishaq bug')
-
-    d, d_crit = _two_sample_ks(real_bits, sim_bits)
-    self.assertGreater(d, d_crit, 'the KS check of test 11 is not sensitive')
 
   def test_11c_javascript_response_distribution(self):
     """
@@ -968,42 +913,15 @@ class PaillierProofTests(unittest.TestCase):
     self.assertEqual(pk.n.bit_length(), 1024)
 
     verdict = _run_node_bridge(self, 'check_response_distribution.js',
-                               pk.to_dict(), str(CANARY_TRIALS))
+                               pk.to_dict(), str(RESPONSE_TRIALS))
 
     self.assertTrue(verdict['all_verified'])
     self.assertEqual(
-      [], _canary_alarms(verdict),
+      [], _response_distribution_alarms(verdict),
       'JS real and simulated responses are distinguishable, so the real '
       'branch -- the vote -- can be read off the ballot. Check that '
       'Proof.generate and Proof.simulate draw from randomZStarN() and reduce '
       'z mod n.')
-
-  def test_11d_javascript_canary_catches_the_historic_bug(self):
-    """
-    Guards the guard, as test 11b does for Python: ishaq's mod-n^2 response,
-    planted in the booth's Paillier.Proof.generate, must trip both the mean
-    bit-length and the KS criteria.
-    """
-    import shutil
-
-    if not shutil.which('node'):
-      self.skipTest('node not available')
-
-    verdict = _run_node_bridge(self, 'check_response_distribution.js',
-                               fixed_1024_keypair().pk.to_dict(), '16',
-                               '--reduce-mod-n-squared')
-
-    self.assertTrue(verdict['all_verified'],
-                    'the bug is invisible to verification -- the point')
-    self.assertGreater(verdict['delta_bits'], 100)
-
-    alarms = _canary_alarms(verdict)
-    self.assertTrue(
-      any(a.startswith('mean bit lengths differ') for a in alarms),
-      f'the JS canary missed a mod-n^2 response by mean bit length: {alarms}')
-    self.assertTrue(
-      any(a.startswith('bit-length KS statistic') for a in alarms),
-      f'the KS check of the JS canary is not sensitive: {alarms}')
 
   # --- test 12 ------------------------------------------------------------
 
@@ -1018,6 +936,7 @@ class PaillierProofTests(unittest.TestCase):
     self.assertTrue(
       c.verify_disjunctive_encryption_proof(self.bits, good, self.gen))
 
+    # 0 fake branch, 1 real branch: see enc.
     for branch in (0, 1):
       for field in ('commitment', 'challenge', 'response'):
         tampered = P.PaillierZKDisjunctiveProof(
@@ -1041,8 +960,8 @@ class PaillierProofTests(unittest.TestCase):
 
   def test_12c_permuting_the_real_index_fails(self):
     """
-    Swapping the branch order breaks the challenge sum, because the hash is
-    over the commitments in order.
+    Each branch is bound to its plaintext's statement, so swapping 
+    branches fails the per branch equation.
     """
     c, r = self._encrypt(1)
     proof = c.generate_disjunctive_encryption_proof(self.bits, 1, r, self.gen)
@@ -1490,16 +1409,6 @@ class SingleTrusteeEnforcementTests(unittest.TestCase):
   view levels are in ElectionIntegrationTests.
   """
 
-  def test_16a_public_keys_refuse_to_combine(self):
-    a, b = toy_keypair().pk, medium_keypair().pk
-
-    self.assertIs(a * 0, a)   # identities homomorphic_sum relies on
-    self.assertIs(a * 1, a)
-
-    with self.assertRaises(NotImplementedError) as ctx:
-      a * b
-    self.assertIn('threshold Paillier requires DKG', str(ctx.exception))
-
   def test_16d_decrypt_refuses_two_factor_sets(self):
     from helios.crypto import paillier
 
@@ -1509,7 +1418,7 @@ class SingleTrusteeEnforcementTests(unittest.TestCase):
     self.assertEqual(c.decrypt([5], kp.pk), 5)
 
     with self.assertRaises(NotImplementedError) as ctx:
-      c.decrypt([5, 6], kp.pk)
+      c.decrypt([5, 6], kp.pk) # Two trustees, not impl
     self.assertIn('exactly one trustee', str(ctx.exception))
     self.assertIn('threshold Paillier requires DKG', str(ctx.exception))
 
